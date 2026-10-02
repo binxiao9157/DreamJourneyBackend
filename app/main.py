@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import asyncio
 from dataclasses import replace
 import hashlib
@@ -23,6 +24,11 @@ except ImportError as exc:  # pragma: no cover - exercised only without runtime 
     raise RuntimeError("FastAPI is not installed. Run `pip install -r requirements.txt`.") from exc
 
 from app.core.config import settings
+from app.observability.metric_dispatch import OperationMetricDispatcher
+from app.observability.voice_launch_diagnostics import VoiceLaunchDiagnosticQueue
+from app.services.owner_truth_live_recovery import (
+    PROTOCOL as LIVE_RECOVERY_PROTOCOL, LiveRecoveryConflict,
+)
 from app.services.owner_truth_live_long_memory import (
     LiveLongMemoryBudgetPolicy,
     LiveLongMemoryRunIdentity,
@@ -6155,6 +6161,8 @@ def _operation_metric_expected_routes() -> set[str]:
     }
 
 
+OPERATION_METRIC_DISPATCHER = OperationMetricDispatcher()
+
 OPERATION_METRIC_RECORDER = OperationMetricRecorder(
     environment=settings.environment,
     build=f"backend-{app.version}",
@@ -7377,7 +7385,9 @@ def _record_operation_metric_attempt(
     correlation_key: Optional[str],
 ) -> None:
     # Metrics are shadow-only. The recorder contains its own sink failure guard.
-    OPERATION_METRIC_RECORDER.record_attempt(
+    OPERATION_METRIC_DISPATCHER.submit(
+        OPERATION_METRIC_RECORDER,
+        occurred_at=datetime.now(timezone.utc),
         request_key=request_key,
         operation_key=operation_key,
         attempt=attempt,
@@ -7775,6 +7785,18 @@ async def prevent_sensitive_response_caching(request: Request, call_next):
     return response
 
 
+@asynccontextmanager
+async def _http_request_unit_of_work(factory, **identity):
+    async_factory = getattr(store, "async_request_unit_of_work", None)
+    if callable(async_factory):
+        async with async_factory(**identity) as unit:
+            yield unit
+    else:
+        # Compatibility for non-Postgres adapters; production Postgres is async.
+        with factory(**identity) as unit:
+            yield unit
+
+
 @app.middleware("http")
 async def database_request_unit_of_work(request: Request, call_next):
     recovery_response = _recovery_access_denied_response(request)
@@ -7787,7 +7809,8 @@ async def database_request_unit_of_work(request: Request, call_next):
     correlation_id = secrets.token_hex(16)
     command_id = secrets.token_hex(16)
     try:
-        with unit_of_work_factory(
+        async with _http_request_unit_of_work(
+            unit_of_work_factory,
             correlation_id=correlation_id,
             command_id=command_id,
         ) as unit_of_work:
@@ -7816,6 +7839,17 @@ async def database_request_unit_of_work(request: Request, call_next):
                 "Retry-After": "1",
                 "X-DreamJourney-Correlation-Id": correlation_id,
             },
+        )
+    if (
+        request.url.path == "/voice/realtime-token"
+        and getattr(request.state, "voice_ticket_write_complete", False)
+        and int(response.status_code) < 400
+        and getattr(unit_of_work, "committed", False)
+    ):
+        _log_voice_launch_stage(
+            request,
+            "ticketStoreCommitted",
+            request.state.voice_launch_started_at,
         )
     response.headers["X-DreamJourney-Correlation-Id"] = correlation_id
     return response
@@ -7896,8 +7930,66 @@ async def shadow_operation_metric_attempt(request: Request, call_next):
     return response
 
 
+def _voice_launch_trace_id(request: Request) -> str:
+    raw = str(request.headers.get("x-dreamjourney-live-launch-trace") or "")
+    try:
+        parsed = UUID(raw)
+    except (ValueError, AttributeError):
+        return secrets.token_hex(16)
+    return str(parsed) if str(parsed) == raw.lower() else secrets.token_hex(16)
+
+
+VOICE_LAUNCH_DIAGNOSTICS = VoiceLaunchDiagnosticQueue()
+VOICE_LAUNCH_STAGE_LOGGER = logging.getLogger(__name__ + ".voice_launch")
+VOICE_LAUNCH_STAGE_LOGGER.setLevel(logging.INFO)
+VOICE_LAUNCH_STAGE_LOGGER.propagate = False
+if not VOICE_LAUNCH_STAGE_LOGGER.handlers:
+    _voice_launch_stage_handler = logging.StreamHandler()
+    _voice_launch_stage_handler.setFormatter(
+        logging.Formatter("%(levelname)s %(name)s %(message)s")
+    )
+    VOICE_LAUNCH_STAGE_LOGGER.addHandler(_voice_launch_stage_handler)
+
+
+def _log_voice_launch_stage(
+    request: Request, stage: str, started_at: float, *, http_status: Optional[int] = None
+) -> None:
+    try:
+        VOICE_LAUNCH_DIAGNOSTICS.submit(
+            VOICE_LAUNCH_STAGE_LOGGER,
+            request.state.voice_launch_trace_id,
+            stage,
+            max(0, int((time.perf_counter() - started_at) * 1000)),
+            http_status,
+        )
+    except Exception:
+        # Diagnostics must not alter ticket issuance, including after commit.
+        pass
+
+
+@app.middleware("http")
+async def trace_voice_launch_ticket(request: Request, call_next):
+    if request.url.path != "/voice/realtime-token" or request.method.upper() != "POST":
+        return await call_next(request)
+    request.state.voice_launch_trace_id = _voice_launch_trace_id(request)
+    started_at = time.perf_counter()
+    request.state.voice_launch_started_at = started_at
+    _log_voice_launch_stage(request, "inbound", started_at)
+    try:
+        response = await call_next(request)
+    except Exception:
+        _log_voice_launch_stage(request, "unhandledFailure", started_at)
+        raise
+    _log_voice_launch_stage(
+        request, "responseReady", started_at, http_status=int(response.status_code)
+    )
+    response.headers["X-DreamJourney-Live-Launch-Trace"] = request.state.voice_launch_trace_id
+    return response
+
+
 @app.on_event("startup")
 def startup() -> None:
+    OPERATION_METRIC_DISPATCHER.start()
     # This checks configuration shape plus local runtime dependencies. A
     # partially configured external provider never prevents API startup, but
     # it is recorded as unavailable and stays fail-closed in the public
@@ -7915,6 +8007,7 @@ def startup() -> None:
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    OPERATION_METRIC_DISPATCHER.close(timeout=1.0)
     close_store(store)
 
 
@@ -7932,7 +8025,7 @@ def health() -> Dict[str, Any]:
 
 
 @app.get("/live")
-def live() -> Dict[str, str]:
+async def live() -> Dict[str, str]:
     return liveness_payload()
 
 
@@ -10665,6 +10758,82 @@ def preview_owner_truth_candidate_changeset(
     )
 
 
+@app.get("/v2/vaults/{vault_id}/live-memory-themes", include_in_schema=False)
+def read_owner_truth_live_themes(request: Request, vault_id: str, after: Optional[str] = None):
+    if not settings.owner_truth_live_recovery_enabled:
+        raise HTTPException(status_code=404, detail="Live recovery is not enabled")
+    from app.domain.owner_truth.live_topics import LiveThemeConflict
+    try:
+        context=_owner_truth_direct_candidate_review_context(request,vault_id=vault_id)
+        with store.request_unit_of_work(correlation_id="live-theme-list",command_id="live-theme-list"):
+            page=store.owner_truth_live_topic_repository().list_pending(context=context,after_id=after)
+    except LiveThemeConflict as error:
+        raise HTTPException(status_code=409,detail=str(error)) from None
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(content={"schemaVersion":"owner-truth-live-theme-inbox-v1","vaultId":vault_id,**page},
+        headers={"Cache-Control":"no-store"})
+
+
+def _live_theme_group_command(request, vault_id, topic_id, payload, *, confirmation):
+    from app.domain.owner_truth.live_topics import LiveThemeConflict
+    from app.domain.owner_truth.memory_changeset_group import OwnerTruthMemoryChangeSetGroupCommand,OwnerTruthMemoryChangeSetGroupSelection
+    from app.domain.owner_truth.candidate_decisions import CandidateReviewAction
+    if not settings.owner_truth_live_recovery_enabled:
+        raise HTTPException(status_code=404,detail="Live recovery is not enabled")
+    context=_owner_truth_direct_candidate_review_context(request,vault_id=vault_id)
+    binding=dict(topicId=topic_id,version=payload.get('version'),proposalHash=payload.get('proposalHash'))
+    # Preview and confirmation bind the visible topic, never just a list of IDs.
+    with store.request_unit_of_work(correlation_id="live-theme-bind",command_id="live-theme-bind"):
+        current=store.owner_truth_live_topic_repository().lock_visible_revision(context=context,
+            topic_id=topic_id,expected_version=binding['version'],expected_hash=binding['proposalHash'],allow_terminal=confirmation)
+    action=payload.get('action','accept')
+    if action not in {'accept','reject'}:raise LiveThemeConflict('unsupportedThemeAction')
+    edits=payload.get('primaryEdits',{})
+    if (not isinstance(edits,dict) or not set(edits)<=set(current['members'])
+        or (action=='reject' and edits) or any(not isinstance(v,str) or not 1<=len(v.strip())<=4000 for v in edits.values())):
+        raise LiveThemeConflict('invalidThemeEdits')
+    command=OwnerTruthMemoryChangeSetGroupCommand(command_id=payload.get('commandId',''),
+        selections=tuple(OwnerTruthMemoryChangeSetGroupSelection(candidate_id=item['candidateId'],
+            expected_candidate_version=1,action=CandidateReviewAction('correct' if atom in edits else action),
+            corrected_value={'statement':edits[atom].strip()} if atom in edits else None,
+            corrected_value_schema_version='owner-truth-v5' if atom in edits else None,
+            reason_code='ownerCorrectedTheme' if atom in edits else 'ownerConfirmedTheme' if action=='accept' else 'ownerRejectedTheme')
+            for atom,item in sorted(current['members'].items())),dependencies=(),theme_binding=binding,
+        expected_memory_revision=payload.get('expectedMemoryRevision') if confirmation else None,
+        expected_group_proposal_id=payload.get('expectedGroupProposalId') if confirmation else None,
+        expected_group_proposal_hash=payload.get('expectedGroupProposalHash') if confirmation else None)
+    return context,command
+
+
+@app.post("/v2/vaults/{vault_id}/live-memory-themes/{topic_id}/preview",include_in_schema=False)
+def preview_owner_truth_live_theme(request: Request,vault_id: str,topic_id: str,payload: Dict[str,Any]):
+    from app.domain.owner_truth.live_topics import LiveThemeConflict
+    try:
+        context,command=_live_theme_group_command(request,vault_id,topic_id,payload,confirmation=False)
+        proposal=OwnerTruthMemoryChangeSetGroupReviewService(store).preview(command=command,context=context)
+    except LiveThemeConflict as error:
+        raise HTTPException(status_code=409,detail=str(error)) from None
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(content={"schemaVersion":"owner-truth-live-theme-preview-v1","topicId":topic_id,
+        "groupProposal":proposal.payload()},headers={"Cache-Control":"no-store"})
+
+
+@app.post("/v2/vaults/{vault_id}/live-memory-themes/{topic_id}/confirm",include_in_schema=False)
+def confirm_owner_truth_live_theme(request: Request,vault_id: str,topic_id: str,payload: Dict[str,Any]):
+    from app.domain.owner_truth.live_topics import LiveThemeConflict
+    try:
+        context,command=_live_theme_group_command(request,vault_id,topic_id,payload,confirmation=True)
+        result=OwnerTruthMemoryChangeSetGroupReviewService(store).confirm(command=command,context=context)
+    except LiveThemeConflict as error:
+        raise HTTPException(status_code=409,detail=str(error)) from None
+    except OwnerTruthContractError as error:
+        raise _owner_truth_candidate_review_http_error(error) from error
+    return JSONResponse(status_code=201 if result.outcome=='created' else 200,
+        content=result.payload(),headers={"Cache-Control":"no-store"})
+
+
 @app.post(
     "/v2/vaults/{vault_id}/memory-changeset-groups/preview",
     include_in_schema=False,
@@ -11073,6 +11242,17 @@ def start_owner_truth_interview_session(
         entry_mode = str(payload.get("entryMode") or "naturalInput").strip()
         if entry_mode not in {"naturalInput", "live"}:
             raise OwnerTruthConversationError("entryMode is not supported")
+        recovery_requested = payload.get("recoveryProtocol")
+        if recovery_requested is not None and (
+            recovery_requested != LIVE_RECOVERY_PROTOCOL or entry_mode != "live"
+        ):
+            raise HTTPException(status_code=400, detail={"code": "liveRecoveryProtocolInvalid"})
+        if recovery_requested and (
+            not settings.owner_truth_live_recovery_enabled
+            or not settings.owner_truth_live_long_memory_pipeline_enabled
+            or not hasattr(store, "owner_truth_live_recovery_repository")
+        ):
+            raise HTTPException(status_code=503, detail={"code": "liveRecoveryUnavailable"})
         command = StartInterviewSessionCommand(
             command_id=str(payload.get("commandId") or ""),
             thread_id=str(payload.get("threadId") or ""),
@@ -11096,18 +11276,92 @@ def start_owner_truth_interview_session(
                 command=command,
                 context=context,
             )
+            recovery_progress = None
+            if recovery_requested:
+                recovery_repository = store.owner_truth_live_recovery_repository()
+                if result.outcome != "created" and not recovery_repository.contains(session_id=command.session_id):
+                    raise LiveRecoveryConflict("legacySessionCannotEnroll")
+                recovery_progress = recovery_repository.enroll(
+                    session_id=command.session_id, context=context,
+                    authority_epoch=int(result.authority_epoch),
+                )
+    except LiveRecoveryConflict as error:
+        raise HTTPException(status_code=409, detail={"code": str(error)}) from error
     except OwnerTruthContractError as error:
         raise _owner_truth_interview_session_state_http_error(error) from error
+    response = _owner_truth_interview_session_command_response(vault_id=context.vault_id, result=result)
+    if recovery_progress is not None:
+        response["recovery"] = recovery_progress
     return JSONResponse(
         status_code=201 if result.outcome == "created" else 200,
-        content=_owner_truth_interview_session_command_response(
-            vault_id=context.vault_id,
-            result=result,
-        ),
+        content=response,
         headers={"Cache-Control": "no-store"},
     )
 
 
+@app.post("/v2/vaults/{vault_id}/interview-sessions/{session_id}/recovery-publication", include_in_schema=False)
+def authorize_owner_truth_live_recovery_publication(request: Request, vault_id: str, session_id: str,
+                                                   payload: Dict[str, Any]) -> JSONResponse:
+    if not settings.owner_truth_live_recovery_enabled or not hasattr(store, "owner_truth_live_recovery_repository"):
+        raise HTTPException(status_code=503, detail={"code":"liveRecoveryUnavailable"})
+    try:
+        # This is an independent current Candidate permission, never a QA or
+        # natural-input capture promoted to background publication authority.
+        context = _owner_truth_captured_release_policy_context(
+            request, vault_id=vault_id, feature="ownerTruthCandidateReview",
+            route="POST /v2/vaults/*/interview-sessions/*/recovery-publication",
+            user_session_required_code="ownerTruthCandidateReviewUserSessionRequired")
+        if payload.get("protocol") != LIVE_RECOVERY_PROTOCOL:
+            raise LiveRecoveryConflict("invalidRecoveryControl")
+        with store.request_unit_of_work(correlation_id="live-recovery-publication", command_id="live-recovery-publication"):
+            session = OwnerTruthInterviewSessionReadService(store).read(session_id=session_id, context=context)
+            repo = store.owner_truth_live_recovery_repository()
+            current = repo.read(session_id=session_id,context=context,authority_epoch=session.authority_epoch)
+            if type(payload.get("generation")) is not int or payload["generation"] != current["generation"]:
+                raise LiveRecoveryConflict("recoveryGenerationMismatch")
+            result = repo.authorize_publication(session_id=session_id,context=context,authority_epoch=session.authority_epoch)
+        return JSONResponse(content=result,headers={"Cache-Control":"no-store"})
+    except LiveRecoveryConflict as error:
+        raise HTTPException(status_code=409,detail={"code":str(error)}) from error
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+
+
+@app.post("/v2/vaults/{vault_id}/interview-sessions/{session_id}/recovery", include_in_schema=False)
+def control_owner_truth_live_recovery(request: Request, vault_id: str, session_id: str,
+                                      payload: Dict[str, Any]) -> JSONResponse:
+    if not settings.owner_truth_live_recovery_enabled or not hasattr(store, "owner_truth_live_recovery_repository"):
+        raise HTTPException(status_code=503, detail={"code": "liveRecoveryUnavailable"})
+    try:
+        context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
+        action = payload.get("action")
+        if action not in {"heartbeat", "disconnect", "close", "status"} or payload.get("protocol") != LIVE_RECOVERY_PROTOCOL:
+            raise LiveRecoveryConflict("invalidRecoveryControl")
+        with store.request_unit_of_work(correlation_id="live-recovery-control", command_id="live-recovery-control"):
+            session = OwnerTruthInterviewSessionReadService(store).read(session_id=session_id, context=context)
+            if session.entry_mode != "live":
+                raise LiveRecoveryConflict("liveSessionRequired")
+            repo = store.owner_truth_live_recovery_repository()
+            if action == "status":
+                result = repo.read(session_id=session_id, context=context, authority_epoch=session.authority_epoch,
+                    range_offset=payload.get("rangeOffset",0), expected_version=payload.get("expectedVersion"))
+                if type(payload.get("generation")) is not int or payload["generation"] != result["generation"]:
+                    raise LiveRecoveryConflict("recoveryGenerationMismatch")
+            else:
+                result = repo.apply(session_id=session_id, context=context,
+                    authority_epoch=session.authority_epoch, generation=payload.get("generation"),
+                    action=action, payload={"finalSequence":payload.get("finalSequence")})
+            result['sessionBinding']=dict(threadId=session.thread_id,sessionVersion=session.row_version,
+                threadVersion=session.thread_version,authorityEpoch=session.authority_epoch,
+                state=session.state.value,boundary=session.boundary.value,productSessionId=session.product_session_id)
+        return JSONResponse(content=result, headers={"Cache-Control":"no-store"})
+    except LiveRecoveryConflict as error:
+        raise HTTPException(status_code=409, detail={"code":str(error)}) from error
+    except OwnerTruthContractError as error:
+        raise _owner_truth_interview_session_state_http_error(error) from error
+
+
+@app.post("/v2/vaults/{vault_id}/interview-sessions/{session_id}/recovery/messages", include_in_schema=False)
 @app.post(
     "/v2/vaults/{vault_id}/interview-sessions/{session_id}/messages",
     include_in_schema=False,
@@ -11120,6 +11374,10 @@ def append_owner_truth_interview_narrative(
 ) -> JSONResponse:
     """Append one private owner/assistant turn to a natural-input session."""
 
+    is_recovery = request.url.path.endswith('/recovery/messages')
+    if is_recovery and (not settings.owner_truth_live_recovery_enabled
+        or payload.get('protocol') != LIVE_RECOVERY_PROTOCOL or type(payload.get('generation')) is not int):
+        raise HTTPException(status_code=409,detail={'code':'liveRecoveryUnavailable'})
     try:
         context = _owner_truth_interview_natural_input_context(request, vault_id=vault_id)
         narrative_text = str(payload.get("text") or "")
@@ -11203,12 +11461,26 @@ def append_owner_truth_interview_narrative(
             ),
             command_id=command.command_id,
         ):
-            result = OwnerTruthConversationService(
-                store.owner_truth_conversation_repository()
-            ).append_message(
-                command=command,
-                context=context,
-            )
+            conversation = store.owner_truth_conversation_repository()
+            if is_recovery:
+                if not hasattr(conversation, 'append_recovery_message'):
+                    raise LiveRecoveryConflict('liveRecoveryUnavailable')
+                result = conversation.append_recovery_message(command.write_record(context=context),generation=payload['generation'])
+            else:
+                result = OwnerTruthConversationService(conversation).append_message(command=command,context=context)
+            uses_recovery = False
+            if settings.owner_truth_live_recovery_enabled and hasattr(store, "owner_truth_live_recovery_repository"):
+                recovery = store.owner_truth_live_recovery_repository()
+                if recovery.contains(session_id=command.session_id):
+                    uses_recovery = True
+                    if capture_mode != "live":
+                        raise LiveRecoveryConflict("liveCaptureModeRequired")
+                    recovery.apply(session_id=command.session_id, context=context,
+                        authority_epoch=int(result.authority_epoch), generation=1, action="receipt",
+                        payload={"sequence":command.client_sequence_number,
+                                 "messageId":command.message_id,"commandId":command.command_id,
+                                 "contentHash":hashlib.sha256(narrative_text.encode("utf-8")).hexdigest(),
+                                 "role":role})
             if (
                 capture_mode == "live"
                 and settings.owner_truth_live_long_memory_pipeline_enabled
@@ -11227,15 +11499,32 @@ def append_owner_truth_interview_narrative(
                     capture_generation=1,
                     authority_epoch=int(live_session.authority_epoch),
                 )
-                store.owner_truth_live_long_memory_repository().register_segment(
-                    identity=identity,
-                    message_id=command.message_id,
-                    sequence=int(result.message_sequence or 0),
-                    role="user" if is_owner_turn else "assistant",
-                    text=narrative_text,
-                    text_hash=hashlib.sha256(narrative_text.encode("utf-8")).hexdigest(),
-                    policy=LiveLongMemoryBudgetPolicy(),
-                )
+                if uses_recovery:
+                    from app.services.owner_truth_live_long_memory import LiveLongMemoryError
+                    try:
+                        with recovery.connection.transaction():
+                            store.owner_truth_live_long_memory_repository().register_segment(
+                                identity=identity,
+                                message_id=command.message_id,
+                                sequence=int(command.client_sequence_number if uses_recovery else result.message_sequence or 0),
+                                role="user" if is_owner_turn else "assistant",
+                                text=narrative_text,
+                                text_hash=hashlib.sha256(narrative_text.encode("utf-8")).hexdigest(),
+                                policy=LiveLongMemoryBudgetPolicy(),
+                            )
+                    except LiveLongMemoryError as planner_error:
+                        recovery.record_planner_failure(session_id=command.session_id,context=context,
+                            authority_epoch=int(result.authority_epoch),code=type(planner_error).__name__)
+                else:
+                    store.owner_truth_live_long_memory_repository().register_segment(
+                        identity=identity,
+                        message_id=command.message_id,
+                        sequence=int(command.client_sequence_number if uses_recovery else result.message_sequence or 0),
+                        role="user" if is_owner_turn else "assistant",
+                        text=narrative_text,
+                        text_hash=hashlib.sha256(narrative_text.encode("utf-8")).hexdigest(),
+                        policy=LiveLongMemoryBudgetPolicy(),
+                    )
             if is_owner_turn:
                 _record_owner_truth_interview_append_decision_audit(
                     command=command,
@@ -11257,6 +11546,8 @@ def append_owner_truth_interview_narrative(
                 transition_command_id=command.command_id,
                 context=context,
             )
+    except LiveRecoveryConflict as error:
+        raise HTTPException(status_code=409, detail={"code":str(error)}) from error
     except OwnerTruthContractError as error:
         raise _owner_truth_interview_session_state_http_error(error) from error
     except (TypeError, ValueError) as error:
@@ -13889,6 +14180,7 @@ def release_policy_observations(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="machine principal required")
     _refresh_runtime_capability_controls()
     summary = RELEASE_POLICY_DECISION_RECORDER.summary()
+    summary["operationMetricDispatch"] = OPERATION_METRIC_DISPATCHER.snapshot()
     summary["operationMetrics"] = summarize_operation_metrics_for_observations(
         OPERATION_METRIC_RECORDER.summary()
     )
@@ -17810,6 +18102,8 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
 @app.post("/voice/realtime-token")
 def realtime_token(request: Request, payload: Dict[str, Any]) -> JSONResponse:
     user_id, payload = _principal_owned_payload(request, payload)
+    started_at = getattr(request.state, "voice_launch_started_at", time.perf_counter())
+    _log_voice_launch_stage(request, "ownerAuthorized", started_at)
     principal = getattr(request.state, "auth_principal", None)
     auth_session_id = (
         str(principal.session_id or "").strip()
@@ -17821,15 +18115,25 @@ def realtime_token(request: Request, payload: Dict[str, Any]) -> JSONResponse:
             status_code=401,
             detail={"code": "authenticatedVoiceSessionRequired"},
         )
+    _log_voice_launch_stage(request, "sessionAuthorized", started_at)
     capability = RealtimeVoiceSessionBroker(settings, store).capability_descriptor()
     if capability.get("status") != "ready":
+        _log_voice_launch_stage(request, "capabilityUnavailable", started_at)
         return JSONResponse(content=capability, headers={"Cache-Control": "no-store"})
+    _log_voice_launch_stage(request, "capabilityReady", started_at)
     live_session = _build_authorized_realtime_live_session(
         request,
         requester_subject_id=user_id,
         payload=payload,
     )
+    _log_voice_launch_stage(request, "snapshotBound", started_at)
     snapshot = live_session["snapshot"]
+
+    def record_ticket_stage(stage: str) -> None:
+        if stage == "ticketStoreWriteComplete":
+            request.state.voice_ticket_write_complete = True
+        _log_voice_launch_stage(request, stage, started_at)
+
     try:
         response = TokenService(settings).issue_realtime_config(
             user_id=user_id,
@@ -17845,6 +18149,7 @@ def realtime_token(request: Request, payload: Dict[str, Any]) -> JSONResponse:
             authority_epoch=snapshot["authorityEpoch"],
             memory_revision=snapshot["memoryRevision"],
             session_context=live_session["sessionContext"],
+            diagnostic_stage=record_ticket_stage,
         )
     except RealtimeVoiceProxyError as exc:
         status_code = 409 if exc.retryable else 503
@@ -17860,6 +18165,7 @@ def realtime_token(request: Request, payload: Dict[str, Any]) -> JSONResponse:
             status_code=status_code,
             detail={"code": exc.code, "retryable": exc.retryable},
         ) from exc
+    _log_voice_launch_stage(request, "ticketResponsePrepared", started_at)
     return JSONResponse(content=response, headers={"Cache-Control": "no-store"})
 
 

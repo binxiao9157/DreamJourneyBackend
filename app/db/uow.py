@@ -77,6 +77,7 @@ class DatabaseUnitOfWork:
         self.checkout_timeout_seconds = checkout_timeout_seconds
         self.connection = None
         self.rollback_reason: Optional[str] = None
+        self.committed = False
 
     def __enter__(self) -> "DatabaseUnitOfWork":
         try:
@@ -128,6 +129,7 @@ class DatabaseUnitOfWork:
             else:
                 try:
                     connection.commit()
+                    self.committed = True
                     self.metrics.committed()
                 except Exception:
                     self.metrics.failed()

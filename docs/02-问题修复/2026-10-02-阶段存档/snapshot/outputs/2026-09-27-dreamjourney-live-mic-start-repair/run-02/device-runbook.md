@@ -1,0 +1,9 @@
+# Later device acceptance (NOT_RUN)
+
+This is a preparation checklist, not authorization to install, deploy, or run on an iPhone. First close the local MIC gaps and verify the intended backend/iOS release manifests and production policy with separate approval.
+
+1. Short scene A: record tap-to-listening time from a monotonic screen/video trace; one synthetic fact, stop, wait for this scene's candidate; user confirms it; read formal memory, restart and confirm no duplicate. Capture safe client launch trace, actual ticket request ordinal/exposure, stage, terminal and backend ticket stage by randomized correlation ID. Stop if policy denies, result becomes unknown, or this scene's identity cannot be matched. No automatic ticket retry.
+2. Logical/local 20-minute proof does not replace physical 20 minutes. On device, after a new independent short gate, run a physical 20-minute multi-turn session with first/middle/late facts, supplement and correction. Confirm candidate visibility, Source identity, explicit review, formal memory and restart readback. Stop on missing tail turns, stale scene ownership, or unknown write.
+3. Future physical 65-minute scene: again start with an independent short gate, then at least five facts across first/middle/tail and a late supplement/correction. Same candidate/review/formal/restart checks, with no hidden cross-scene retry or duplicated candidate.
+
+Measure tap-to-listening separately from audio quality. Silence/ASR/listening-state automation can be instrumented locally, but physical acoustic playback, microphone, interruption and car/Bluetooth behavior remain separate device observations. Historical near-minute launch and the 23:04 error are not explained by local code evidence alone. Keep real Provider and physical acoustics NOT_RUN until explicitly authorized.

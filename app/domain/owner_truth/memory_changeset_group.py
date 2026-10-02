@@ -162,14 +162,24 @@ class OwnerTruthMemoryChangeSetGroupCommand:
     expected_memory_revision: int | None = None
     expected_group_proposal_id: str | None = None
     expected_group_proposal_hash: str | None = None
+    theme_binding: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         normalized_command_id = str(self.command_id or "").strip()
         if not normalized_command_id or len(normalized_command_id) > 128:
             raise OwnerTruthMemoryChangeSetGroupError("group command_id is invalid")
         object.__setattr__(self, "command_id", normalized_command_id)
+        if self.theme_binding is not None:
+            binding = dict(self.theme_binding)
+            if (set(binding)!={"topicId","version","proposalHash"}
+                or type(binding["version"]) is not int or binding["version"]<1
+                or not isinstance(binding["proposalHash"],str) or len(binding["proposalHash"])!=64
+                or any(c not in "0123456789abcdef" for c in binding["proposalHash"])):
+                raise OwnerTruthMemoryChangeSetGroupError("invalid theme binding")
+            binding["topicId"]=require_uuid(binding["topicId"],field="topicId")
+            object.__setattr__(self,"theme_binding",binding)
         selections = tuple(self.selections)
-        if len(selections) < 2:
+        if len(selections) < (1 if self.theme_binding is not None else 2):
             raise OwnerTruthMemoryChangeSetGroupError(
                 "an atomic ChangeSet group requires at least two Candidates"
             )
@@ -183,7 +193,7 @@ class OwnerTruthMemoryChangeSetGroupCommand:
             raise OwnerTruthMemoryChangeSetGroupError("group cannot repeat a Candidate")
         object.__setattr__(self, "selections", selections)
         dependencies = tuple(self.dependencies)
-        if not dependencies:
+        if not dependencies and self.theme_binding is None:
             raise OwnerTruthMemoryChangeSetGroupError(
                 "an atomic ChangeSet group requires an explicit dependency"
             )
@@ -270,6 +280,7 @@ class OwnerTruthMemoryChangeSetGroupCommand:
 
         return _digest(
             {
+                **({"themeBinding": dict(self.theme_binding)} if self.theme_binding is not None else {}),
                 "selections": [selection.payload() for selection in self.selections],
                 "dependencies": [dependency.payload() for dependency in self.dependencies],
             }
@@ -279,6 +290,7 @@ class OwnerTruthMemoryChangeSetGroupCommand:
     def payload_hash(self) -> str:
         return _digest(
             {
+                **({"themeBinding": dict(self.theme_binding)} if self.theme_binding is not None else {}),
                 "selections": [selection.payload() for selection in self.selections],
                 "dependencies": [dependency.payload() for dependency in self.dependencies],
                 "expectedMemoryRevision": self.expected_memory_revision,
@@ -361,6 +373,7 @@ class OwnerTruthMemoryChangeSetGroupProposal:
     members: tuple[OwnerTruthMemoryChangeSetGroupMember, ...]
     dependencies: tuple[OwnerTruthMemoryChangeSetGroupDependency, ...]
     schema_version: str = OWNER_TRUTH_MEMORY_CHANGESET_GROUP_SCHEMA_VERSION
+    theme_binding: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "proposal_id", require_uuid(self.proposal_id, field="proposal_id"))
@@ -377,7 +390,7 @@ class OwnerTruthMemoryChangeSetGroupProposal:
         if self.base_memory_revision < 0:
             raise OwnerTruthMemoryChangeSetGroupError("base_memory_revision must be non-negative")
         members = tuple(self.members)
-        if len(members) < 2 or any(
+        if len(members) < (1 if self.theme_binding is not None else 2) or any(
             not isinstance(member, OwnerTruthMemoryChangeSetGroupMember) for member in members
         ):
             raise OwnerTruthMemoryChangeSetGroupError("group proposal members are invalid")
@@ -387,7 +400,7 @@ class OwnerTruthMemoryChangeSetGroupProposal:
         if len(candidate_ids) != len(set(candidate_ids)):
             raise OwnerTruthMemoryChangeSetGroupError("group proposal repeats a Candidate")
         dependencies = tuple(self.dependencies)
-        if not dependencies:
+        if not dependencies and self.theme_binding is None:
             raise OwnerTruthMemoryChangeSetGroupError("group proposal requires dependencies")
         object.__setattr__(self, "members", members)
         object.__setattr__(self, "dependencies", dependencies)
@@ -397,6 +410,7 @@ class OwnerTruthMemoryChangeSetGroupProposal:
     def payload(self) -> dict[str, Any]:
         return {
             "schemaVersion": self.schema_version,
+            **({"themeBinding": dict(self.theme_binding)} if self.theme_binding is not None else {}),
             "groupProposalId": self.proposal_id,
             "groupProposalHash": self.proposal_hash,
             "vaultId": self.vault_id,
@@ -410,6 +424,7 @@ def _topological_selections(
     *,
     selections: Iterable[OwnerTruthMemoryChangeSetGroupSelection],
     dependencies: Iterable[OwnerTruthMemoryChangeSetGroupDependency],
+    require_connected: bool = True,
 ) -> tuple[OwnerTruthMemoryChangeSetGroupSelection, ...]:
     """Return a stable dependency order and reject cycles/disconnected groups."""
 
@@ -432,7 +447,7 @@ def _topological_selections(
             if neighbor not in reachable:
                 reachable.add(neighbor)
                 frontier.append(neighbor)
-    if len(reachable) != len(ordered):
+    if require_connected and len(reachable) != len(ordered):
         raise OwnerTruthMemoryChangeSetGroupError(
             "unrelated Candidates must be submitted as separate review groups"
         )
@@ -516,6 +531,7 @@ def build_memory_changeset_group_proposal(
     ordered = _topological_selections(
         selections=command.selections,
         dependencies=command.dependencies,
+        require_connected=command.theme_binding is None,
     )
     virtual_current = tuple(current_memories)
     virtual_revision = base_memory_revision
@@ -578,6 +594,7 @@ def build_memory_changeset_group_proposal(
         )
 
     payload_without_identity = {
+        **({"themeBinding": dict(command.theme_binding)} if command.theme_binding is not None else {}),
         "schemaVersion": OWNER_TRUTH_MEMORY_CHANGESET_GROUP_SCHEMA_VERSION,
         "vaultId": context.vault_id,
         "ownerSubjectId": context.owner_subject_id,
@@ -607,6 +624,7 @@ def build_memory_changeset_group_proposal(
         base_memory_revision=base_memory_revision,
         members=tuple(members),
         dependencies=command.dependencies,
+        theme_binding=command.theme_binding,
     )
 
 

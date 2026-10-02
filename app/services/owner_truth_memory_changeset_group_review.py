@@ -209,6 +209,7 @@ class OwnerTruthMemoryChangeSetGroupReviewService:
             command_id=f"ownerTruthMemoryChangeSetGroupPreview:{command.command_id_hash}",
         ):
             repository = self._store.owner_truth_candidate_review_repository()
+            self._bind_live_theme(repository=repository,command=command,context=context)
             proposal = self._build_fresh_proposal(
                 repository=repository,
                 command=command,
@@ -265,6 +266,7 @@ class OwnerTruthMemoryChangeSetGroupReviewService:
                     outcome="deduplicated",
                 )
 
+            self._bind_live_theme(repository=repository,command=command,context=context)
             transaction = getattr(repository, "transaction", None)
             candidate_scope = transaction() if callable(transaction) else nullcontext()
             effect_repository = self._effect_repository()
@@ -338,12 +340,33 @@ class OwnerTruthMemoryChangeSetGroupReviewService:
                     raise OwnerTruthMemoryChangeSetGroupError(
                         "Candidate repository does not support group receipt persistence"
                     )
+                if command.theme_binding is not None:
+                    binding=command.theme_binding
+                    actions={selection.action.value for selection in command.selections}
+                    state="rejected" if actions=={"reject"} else "accepted"
+                    self._store.owner_truth_live_topic_repository().record_decision(
+                        context=context,topic_id=binding["topicId"],expected_version=binding["version"],
+                        expected_hash=binding["proposalHash"],state=state)
                 receipt_writer(
                     result=result,
                     command=command,
                     context=context,
                 )
                 return result
+
+    def _bind_live_theme(self, *, repository, command, context):
+        if command.theme_binding is None:return
+        binding=command.theme_binding
+        topic=self._store.owner_truth_live_topic_repository().lock_visible_revision(
+            context=context,topic_id=binding["topicId"],expected_version=binding["version"],
+            expected_hash=binding["proposalHash"])
+        expected={m['candidateId']:m['proposalHash'] for m in topic['members'].values()}
+        if {s.candidate_id for s in command.selections}!=set(expected):
+            raise OwnerTruthCandidateReviewConflict("theme confirmation must include exact visible members")
+        actions={s.action.value for s in command.selections}
+        if 'reject' in actions and actions!={'reject'}:
+            raise OwnerTruthCandidateReviewConflict("theme cannot mix rejection and confirmation")
+        repository._live_theme_member_scope=expected
 
     def lookup_result(
         self,

@@ -15,6 +15,7 @@ from app.db.migrator import PostgresMigrator, default_migrations_dir
 from app.db.pool import ConnectionPoolExhausted, FactoryConnectionPool, PsycopgConnectionPool
 from app.db.readiness import PostgresReadinessProbe
 from app.db.uow import DatabaseUnitOfWork, UnitOfWorkMetrics
+from app.db.async_uow import AsyncRequestUnitOfWork
 from app.observability.events import (
     EvidenceEventConflict,
     canonicalize_evidence_event,
@@ -276,6 +277,14 @@ class PostgresStore:
             default=None,
         )
 
+        self._async_request_uow = AsyncRequestUnitOfWork(
+            self._pool, self._uow_metrics, self._current_uow,
+            timeout=self._pool_timeout_seconds, concurrency=pool_max_size,
+        )
+
+    def async_request_unit_of_work(self, *, correlation_id: str, command_id: str):
+        return self._async_request_uow.open(correlation_id=correlation_id, command_id=command_id)
+
     def open_pool(self, *, wait: bool = True) -> None:
         self._pool.open(wait=wait)
 
@@ -523,6 +532,20 @@ class PostgresStore:
         if active is None:
             raise RuntimeError("owner truth candidate extraction requires an active unit of work")
         return PostgresOwnerTruthCandidateExtractionRepository(active.connection)
+
+    def owner_truth_live_topic_repository(self):
+        from app.services.owner_truth_live_topics import PostgresLiveTopicRepository
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("Live topics require an active unit of work")
+        return PostgresLiveTopicRepository(active.connection)
+
+    def owner_truth_live_recovery_repository(self):
+        from app.services.owner_truth_live_recovery import PostgresLiveRecoveryRepository
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("Live recovery requires an active unit of work")
+        return PostgresLiveRecoveryRepository(active.connection)
 
     def owner_truth_live_long_memory_repository(
         self,

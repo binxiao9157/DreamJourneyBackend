@@ -159,6 +159,23 @@ class RealtimeVoiceSessionBrokerTests(unittest.TestCase):
             auth_session_id=self.auth["sessionId"],
         )
 
+    def test_diagnostic_failure_before_or_after_ticket_write_does_not_change_issuance(self):
+        for failing_stage in ("ticketStoreBegin", "ticketStoreWriteComplete"):
+            with self.subTest(failing_stage=failing_stage):
+                def diagnostic(stage):
+                    if stage == failing_stage:
+                        raise RuntimeError("synthetic diagnostic failure")
+
+                config = self.broker.issue_runtime_config(
+                    user_id=self.user["id"],
+                    auth_session_id=self.auth["sessionId"],
+                    diagnostic_stage=diagnostic,
+                )
+                self.assertEqual(config["status"], "ready")
+                lease = self.broker.consume(config["proxy"]["sessionToken"])
+                self.assertIsNotNone(lease)
+                self.broker.release(lease, reason="syntheticTestComplete")
+
     def test_ready_contract_exposes_only_backend_proxy_ticket(self):
         config = self.issue()
 

@@ -2173,6 +2173,12 @@ class PostgresOwnerTruthConversationRepository:
         self,
         record: AppendInterviewMessageWriteRecord,
     ) -> OwnerTruthInterviewSessionResult:
+        return self._append_interview_message(record)
+
+    def append_recovery_message(self, record, *, generation):
+        return self._append_interview_message(record, recovery_generation=generation)
+
+    def _append_interview_message(self, record, *, recovery_generation=None):
         with self._cursor() as cursor:
             self._lock(cursor, f"owner-truth-conversation-command:{record.vault_id}:{record.command_id_hash}")
             self._lock(cursor, f"owner-truth-conversation-session:{record.vault_id}:{record.session_id}")
@@ -2182,6 +2188,25 @@ class PostgresOwnerTruthConversationRepository:
                 owner_subject_id=record.owner_subject_id,
                 lock=True,
             )
+            recovery_coordinates = None
+            if recovery_generation is not None:
+                from app.services.owner_truth_live_recovery import LiveRecoveryConflict, PROTOCOL
+                cursor.execute("""SELECT coordinates FROM owner_truth.live_recovery_sessions
+                    WHERE session_id=%s AND vault_id=%s AND owner_subject_id=%s AND authority_epoch=%s
+                      AND protocol=%s FOR UPDATE""",(record.session_id,record.vault_id,
+                    record.owner_subject_id,int(vault['authority_epoch']),PROTOCOL))
+                enrolled=cursor.fetchone()
+                if (enrolled is None or record.actor_subject_id!=record.owner_subject_id
+                    or type(recovery_generation) is not int
+                    or enrolled['coordinates']['generation']!=recovery_generation
+                    or record.content_payload.get('captureMode')!='live'):
+                    raise LiveRecoveryConflict('recoveryIdentityOrAuthorityMismatch')
+                recovery_coordinates=enrolled['coordinates']
+                seq=record.client_sequence_number
+                final=recovery_coordinates['finalSequence']
+                if type(seq) is not int or not 1<=seq<=recovery_coordinates['policy']['maximum_sequence']:
+                    raise LiveRecoveryConflict('invalidClientSequence')
+                if final is not None and seq>final:raise LiveRecoveryConflict('messageOutsideFinalBoundary')
             existing = self._receipt_by_command(
                 cursor,
                 vault_id=record.vault_id,
@@ -2189,6 +2214,12 @@ class PostgresOwnerTruthConversationRepository:
             )
             if existing is not None:
                 return self._deduplicated_result(cursor, existing=existing, record=record)
+            if (recovery_coordinates is not None and recovery_coordinates['finalSequence'] is None
+                and recovery_coordinates['closeRequestedAt'] is not None):
+                captured=datetime.fromisoformat(str(record.captured_at).replace('Z','+00:00'))
+                cutoff=datetime.fromisoformat(recovery_coordinates['closeRequestedAt'])
+                if captured.tzinfo is None or captured>cutoff:
+                    raise LiveRecoveryConflict('messageCapturedAfterClose')
             session, thread = self._locked_session_and_thread(cursor, record=record)
             self._assert_live_session(
                 session=session,
@@ -2196,7 +2227,13 @@ class PostgresOwnerTruthConversationRepository:
                 record=record,
                 authority_epoch=int(vault["authority_epoch"]),
             )
-            if str(session["state"]) != InterviewSessionState.ACTIVE.value:
+            if recovery_coordinates is not None:
+                # Only the authenticated new-protocol replay lane updates CAS
+                # guards; immutable body identity/payload hash remain unchanged.
+                from dataclasses import replace
+                record=replace(record,expected_thread_version=int(thread['row_version']),
+                    expected_session_version=int(session['row_version']))
+            if recovery_coordinates is None and str(session["state"]) != InterviewSessionState.ACTIVE.value:
                 raise OwnerTruthInterviewSessionStateConflict(
                     "interview session is not active for a new message"
                 )
@@ -2215,7 +2252,7 @@ class PostgresOwnerTruthConversationRepository:
             self._assert_client_sequence_absent(cursor, record=record)
             next_boundary = (
                 InterviewBoundary.OPEN.value
-                if _should_consume_skip_once_after_append(
+                if recovery_coordinates is None and _should_consume_skip_once_after_append(
                     boundary=str(session["boundary"]),
                     record=record,
                 )

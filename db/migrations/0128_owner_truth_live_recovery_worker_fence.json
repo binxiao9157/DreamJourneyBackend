@@ -1,0 +1,24 @@
+{
+  "version": "0128",
+  "name": "owner_truth_live_recovery_worker_fence",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLiveRecoveryV1",
+  "requiresOldWorkerDrain": true,
+  "releaseFlags": {
+    "ownerTruthLiveRecovery": false
+  },
+  "summary": "Fence private recovery unit claims from old or capability-disabled Workers.",
+  "operations": [
+    "add capability check for recovery work-unit claims"
+  ],
+  "rollback": "Disable ownerTruthLiveRecovery. Keep all recovery records and snapshots; do not replay historical tasks.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": false
+  }
+}

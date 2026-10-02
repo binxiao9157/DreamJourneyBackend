@@ -655,6 +655,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
         self._long_memory_pipeline_enabled = (
             settings.owner_truth_live_long_memory_pipeline_enabled
         )
+        self._recovery_pipeline_enabled = settings.owner_truth_live_recovery_enabled
         self._run_repository = run_repository or InMemoryLiveLongMemoryRepository()
         self._run_budget_policy = LiveLongMemoryBudgetPolicy()
 
@@ -677,6 +678,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
             worker_id=worker_id,
             lease_seconds=max(1, min(900, int(lease_seconds))),
             maximum_concurrency=self._run_budget_policy.maximum_provider_concurrency,
+            recovery_enabled=self._recovery_pipeline_enabled,
         )
         if lease is None:
             return {"status": "idle", "reason": "noPlannedLiveMemoryUnit"}
@@ -757,7 +759,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                     )
                     retry_seconds = max(5, failure.retry_after_seconds or 0)
                     remaining = policy.absolute_deadline_seconds
-                    if current.get("sourceId") is not None:
+                    if current.get("organizationStartedAt") is not None:
                         started = datetime.fromisoformat(str(current["organizationStartedAt"]))
                         progressed = datetime.fromisoformat(str(current["lastProgressAt"]))
                         now = datetime.now(timezone.utc)
@@ -1243,6 +1245,11 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
             )
         if stage_reporter is not None:
             stage_reporter("supportValidated", {"memoryCount": len(memories)})
+        return self.build_verified_proposals(intent=intent,source=source,turns=turns,
+            memories=memories,stage_reporter=stage_reporter)
+
+    def build_verified_proposals(self, *, intent, source, turns, memories, stage_reporter=None):
+        """V5 encoding only. Callers must already prove support and Source ranges."""
         spans = self._owner_evidence_spans(source=source, turns=turns)
         source_perspective, source_epistemic = _source_provenance(
             source.source_metadata or {}
@@ -2978,12 +2985,38 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
         unit = self._run_repository.record_unit(plan)
         if unit.get("state") == "completed":
             results = list((unit.get("coverage") or {}).get("results") or [])
-            self._validate_relation_batch_results(
-                results,
-                incoming_count=len(incoming),
-                existing_count=len(existing),
-            )
+            try:
+                self._validate_relation_batch_results(
+                    results, incoming_count=len(incoming), existing_count=len(existing), intra_batch=intra_batch,
+                )
+                expected = sha256(json.dumps({"results": results}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                if unit.get("outputHash") != expected:
+                    raise contract_failure("relationValidate", "cachedOutputHashMismatch")
+            except LiveMemoryContractFailure as error:
+                _log_stage_diagnostic({"stage": "relationCachedOutputRejected", "reason": error.reason})
+                raise
             return results
+        if unit.get("state") == "failed":
+            code = str(unit.get("failureCode") or "")
+            reason = code.rsplit(".", 1)[-1] if code.startswith("candidateExtraction.live.relationValidate.") else "previousUnitFailed"
+            raise contract_failure("relationValidate", reason)
+        prior_attempts = [a for a in (self._run_repository.snapshot(run_identity.run_id) or {}).get("attempts", [])
+                          if a.get("unitId") == plan.unit_id]
+        if prior_attempts and prepared_relation is not None:
+            # Keep unit/input identity and the original durable budget. Only the
+            # next paid request gains explicit value-free contract feedback.
+            body = prepared_relation.payload()
+            body["messages"][0]["content"] += (
+                " Previous response failed relation validation. Return every incomingIndex exactly once."
+                " For intraBatch=true, existingIndex MUST be smaller than incomingIndex;"
+                " incomingIndex=0 MUST have empty decisions. Never reference self or future atoms."
+                " If unrelated, return empty decisions; do not invent evidence or remove facts."
+            )
+            prepared_relation = PreparedLiveModelRequest.freeze({"url": prepared_relation.url,
+                "headers": dict(prepared_relation.headers), "json": body})
+            measured_request = prepared_relation.payload()
+            if len(prepared_relation.body) > 55_000:
+                raise contract_failure("relationInput", "inputOverCapacity", category="input")
         try:
             reservation = self._run_repository.reserve_provider_attempt(
                 run_id=run_identity.run_id,
@@ -2996,7 +3029,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 ).hexdigest(),
                 reserved_input_tokens=conservative_token_estimate(measured_request or request_payload),
                 reserved_output_tokens=4_096,
-                recovery=retry_context is not None,
+                recovery=bool(prior_attempts) or retry_context is not None,
                 policy=self._run_budget_policy,
             )
         except LiveLongMemoryBudgetExhausted:
@@ -3014,6 +3047,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 "memoryBytes": len(json.dumps([*incoming, *existing], ensure_ascii=False).encode("utf-8")),
             })
             raise
+        review = None
         try:
             review = self._relation_reviewer.request_relation_batch_review(
                 turns=request_payload["turns"],
@@ -3027,6 +3061,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 results,
                 incoming_count=len(incoming),
                 existing_count=len(existing),
+                intra_batch=intra_batch,
             )
         except Exception as error:
             self._run_repository.complete_provider_attempt(
@@ -3034,9 +3069,19 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 exposure_state=self._provider_failure_exposure(error),
                 model=str(getattr(self._relation_reviewer, "model", "unknown")),
                 finish_reason=None,
-                usage=None,
-                response_hash=None,
+                usage={"_diagnostic": {"stage": getattr(error, "stage", "relationRequest"),
+                    "reason": getattr(error, "reason", "unclassified"), "validationVersion": "relation-batch-v2",
+                    "inputHash": plan.input_hash, "httpStatus": getattr(error, "provider_status", None)}},
+                response_hash=(sha256(json.dumps(review, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                               if review is not None else None),
             )
+            if isinstance(error, LiveMemoryContractFailure):
+                retryable = error.transport_retryable or error.contract_retry_eligible
+                self._run_repository.record_unit_failure(
+                    plan=plan, failure_code=error.code, provider_attempt_id=reservation.attempt_id,
+                    terminal=bool(prior_attempts) or not retryable,
+                    retry_seconds=error.retry_after_seconds or 0,
+                )
             raise
         finish_reason = str(review.pop("_providerFinishReason", "stop") or "stop")
         usage = review.pop("_providerUsage", None)
@@ -3055,7 +3100,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
             plan=plan,
             atoms=(),
             output_hash=response_hash,
-            coverage={"results": results},
+            coverage={"results": results}, provider_attempt_id=reservation.attempt_id,
         )
         return results
 
@@ -3065,6 +3110,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
         *,
         incoming_count: int,
         existing_count: int,
+        intra_batch: bool = False,
     ) -> set[str]:
         if len(results) != incoming_count:
             raise contract_failure("relationValidate", "coverageInvalid")
@@ -3080,6 +3126,7 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 or not isinstance(incoming_index, int)
                 or not 0 <= incoming_index < incoming_count
                 or incoming_index in seen
+                or type(result.get("scannedExistingCount")) is not int
                 or result.get("scannedExistingCount") != existing_count
                 or not isinstance(decisions, list)
                 or len(decisions) > 1
@@ -3095,6 +3142,14 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                     or not 0 <= target < existing_count
                 ):
                     raise contract_failure("relationValidate", "targetInvalid")
+                if intra_batch and target >= incoming_index:
+                    raise contract_failure("relationValidate", "forwardBatchTarget", eligible=True)
+                if decision.get("relation") not in {"duplicate", "supplement", "correction", "retraction", "unresolved"}:
+                    raise contract_failure("relationValidate", "relationInvalid", eligible=True)
+                if decision.get("relation") == "supplement" and not isinstance(decision.get("resolvedMemory"), dict):
+                    raise contract_failure("relationValidate", "resolvedMemoryMissing", eligible=True)
+                if decision.get("relation") == "unresolved":
+                    raise contract_failure("relationValidate", "unresolved", eligible=True)
             total_decisions += len(decisions)
             seen.add(incoming_index)
         if total_decisions > 64:
@@ -3510,10 +3565,25 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
         if self._live_preorganizer is None:
             return {"status": "idle", "reason": "livePreorganizationNotConfigured"}
         try:
-            return self._live_preorganizer.preorganize_once(
+            if self._settings.owner_truth_live_recovery_enabled:
+                with self._store.request_unit_of_work(
+                    correlation_id="live-recovery-scan", command_id="live-recovery-scan"
+                ):
+                    self._store.owner_truth_live_recovery_repository().scan()
+                from app.services.owner_truth_live_recovery import LiveRecoverySnapshotScheduler
+                LiveRecoverySnapshotScheduler(self._store).run_once()
+            result = self._live_preorganizer.preorganize_once(
                 worker_id=f"{self._worker_id}:live",
                 lease_seconds=self._lease_seconds,
             )
+            if self._settings.owner_truth_live_recovery_enabled:
+                from app.async_effects.owner_truth_live_private_themes import RecoveryPrivateThemePlanner
+                private = RecoveryPrivateThemePlanner(self).run_once()
+                if result.get("status") == "idle":
+                    return private
+                if private.get("status") != "idle":
+                    result["privateThemeDraft"] = private
+            return result
         except Exception as error:
             failure = _classify_candidate_extraction_failure(error)
             return {
@@ -3627,7 +3697,17 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
 
         # DeepSeek is used only here, outside the database transaction. Lease
         # heartbeat remains active so another worker cannot persist a duplicate.
-        command = self._extract_with_lease_heartbeat(
+        assembly = None
+        if intent.job_type == "ownerTruth.live.recoverySnapshot":
+            from app.async_effects.owner_truth_live_recovery_worker import RecoveryThemeAssembler
+            heartbeat = self._start_lease_heartbeat(lease)
+            try:
+                assembly = RecoveryThemeAssembler(self).assemble(lease=lease,intent=intent,source=source)
+            finally:
+                self._stop_and_verify_lease_heartbeat(heartbeat)
+            command = assembly.command
+        else:
+            command = self._extract_with_lease_heartbeat(
             lease=lease,
             intent=intent,
             source=source,
@@ -3690,6 +3770,42 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                     "candidate extraction completed without a terminal result"
                 )
 
+            if assembly is not None:
+                from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
+                from psycopg.types.json import Jsonb
+                from app.domain.owner_truth.live_topics import digest
+                context = OwnerTruthCommandContext(vault_id=intent.target.vault_id,
+                    owner_subject_id=intent.target.owner_subject_id,actor_subject_id=intent.target.owner_subject_id)
+                topic_repo = self._store.owner_truth_live_topic_repository()
+                records = command.write_record().candidate_records
+                bindings = {aid:record.candidate_id for aid,record in zip(assembly.atom_order,records)}
+                if len(bindings)!=len(records):
+                    raise contract_failure("candidateCommit","themeCandidateBindingMismatch",category="domain")
+                cards=[];unchanged=[]
+                for theme in assembly.themes:
+                    relation=assembly.relations.get(theme.key)
+                    previous=relation['previous'] if relation else topic_repo.related_by_evidence(context=context,atom_ids=theme.atom_ids)
+                    card=topic_repo.publish(context=context,authority_epoch=intent.target.authority_epoch,
+                        theme=theme,stable_key=source.source_metadata["sessionId"]+":"+min(theme.atom_ids),
+                        snapshot_id=source.source_metadata["snapshotId"],source_id=source.source_id,
+                        previous_topic_id=previous['topicId'] if previous else None,
+                        expected_version=previous['version'] if previous else 0,
+                        change_reason=relation['changeReason'] if relation else 'supplement' if previous else 'new',
+                        retained_members=relation['retained'] if relation else None,
+                        expected_previous_hash=previous['proposalHash'] if previous else None,
+                        relation_proof=relation['proof'] if relation else None,
+                        atom_candidate_ids={aid:bindings[aid] for aid in theme.atom_ids if aid in bindings})
+                    if card.get('status')=='noChange':unchanged.append(card)
+                    else:cards.append(card)
+                manifest={**assembly.manifest,"themeCount":len(cards),"unchangedThemes":unchanged,"themes":[dict(topicId=c['topicId'],version=c['version'],
+                    proposalHash=c['proposalHash']) for c in cards]}
+                manifest.pop("hash",None);manifest['hash']=digest(manifest)
+                with topic_repo._cursor() as cur:
+                    cur.execute("""UPDATE owner_truth.live_recovery_snapshots
+                        SET state=%s,publication_manifest=%s WHERE id=%s AND source_id=%s""",
+                        ('published' if cards else 'noChange',Jsonb(manifest),source.source_metadata['snapshotId'],source.source_id))
+                    if cur.rowcount!=1:raise contract_failure("candidateCommit","snapshotBindingMissing",category="domain")
+
             publication_binding = getattr(
                 self._extractor,
                 "publication_binding",
@@ -3697,6 +3813,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             )
             if (
                 is_live_source
+                and assembly is None
                 and self._settings.owner_truth_live_long_memory_pipeline_enabled
                 and result.status is ExtractionResultStatus.SUCCEEDED
                 and callable(publication_binding)
@@ -3770,7 +3887,7 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
     def _assert_typed_intent(intent: AsyncEffectIntent) -> None:
         target = intent.target
         if (
-            intent.job_type != _SOURCE_CANDIDATE_EXTRACTION_JOB_TYPE
+            intent.job_type not in {_SOURCE_CANDIDATE_EXTRACTION_JOB_TYPE,"ownerTruth.live.recoverySnapshot"}
             or intent.operation_type != "ownerTruth.source.created"
             or target.resource_type != "source"
             or target.purpose != "candidateExtraction"
@@ -3795,7 +3912,9 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
             return self._store.async_effect_lease_repository().claim_next(
                 worker_id=self._worker_id,
                 lease_seconds=self._lease_seconds,
-                supported_job_types=[_SOURCE_CANDIDATE_EXTRACTION_JOB_TYPE],
+                supported_job_types=[_SOURCE_CANDIDATE_EXTRACTION_JOB_TYPE] + (
+                    ["ownerTruth.live.recoverySnapshot"] if self._settings.owner_truth_live_recovery_enabled
+                    and self._live_preorganizer is not None else []),
                 require_live_run_ready=(
                     self._settings.owner_truth_live_long_memory_pipeline_enabled
                 ),
@@ -4010,6 +4129,12 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                         receipt=extraction_result.consumer,
                         extraction_result=extraction_result,
                     )
+
+                if intent.job_type == "ownerTruth.live.recoverySnapshot":
+                    repo=self._store.owner_truth_live_topic_repository()
+                    with repo._cursor() as cur:
+                        cur.execute("UPDATE owner_truth.live_recovery_snapshots SET state='failed' WHERE source_id=%s AND publication_manifest IS NULL",
+                            (source.source_id,))
 
                 completion = lease_repository.complete(
                     lease,

@@ -1,0 +1,24 @@
+{
+  "version": "0127",
+  "name": "owner_truth_live_topic_member_reuse",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLiveRecoveryV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthLiveRecovery": false
+  },
+  "summary": "Retain immutable facts across pending theme revisions with source revalidation.",
+  "operations": [
+    "allow versioned reuse of immutable candidate members"
+  ],
+  "rollback": "Disable ownerTruthLiveRecovery. Keep all recovery records and snapshots; do not replay historical tasks.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": false
+  }
+}

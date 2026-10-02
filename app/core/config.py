@@ -146,6 +146,7 @@ class Settings:
     # Long Live memory processing is a separately versioned, default-off lane.
     # It bounds every provider request and never changes legacy extraction jobs.
     owner_truth_live_long_memory_pipeline_enabled: bool = False
+    owner_truth_live_recovery_enabled: bool = False
     # Owner-authored Archive text uses a separate consent and rollout lane.
     # When enabled, the text is organized into typed review Candidates instead
     # of being persisted as one undifferentiated echo of the Source.
@@ -685,6 +686,9 @@ class Settings:
             owner_truth_live_memory_organization_enabled=_env_bool(
                 "OWNER_TRUTH_LIVE_MEMORY_ORGANIZATION_ENABLED",
                 cls.owner_truth_live_memory_organization_enabled,
+            ),
+            owner_truth_live_recovery_enabled=_env_bool(
+                "OWNER_TRUTH_LIVE_RECOVERY_ENABLED", cls.owner_truth_live_recovery_enabled,
             ),
             owner_truth_live_long_memory_pipeline_enabled=_env_bool(
                 "OWNER_TRUTH_LIVE_LONG_MEMORY_PIPELINE_ENABLED",

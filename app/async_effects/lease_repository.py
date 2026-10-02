@@ -738,6 +738,29 @@ class PostgresAsyncEffectLeaseRepository:
                       )
                 """
                 parameters.append("ownerTruth.source.created")
+            recovery_ready_clause = ""
+            if "ownerTruth.live.recoverySnapshot" in normalized_job_types:
+                recovery_ready_clause = """
+                      AND (job.job_type <> 'ownerTruth.live.recoverySnapshot' OR NOT EXISTS (
+                          SELECT 1 FROM owner_truth.live_recovery_snapshots current_snapshot
+                          JOIN owner_truth.live_recovery_snapshots earlier
+                            ON earlier.session_id=current_snapshot.session_id
+                           AND earlier.revision<current_snapshot.revision
+                          WHERE current_snapshot.source_id::text=job.resource_id AND earlier.state='pending'
+                      ))
+                      AND (job.job_type <> 'ownerTruth.live.recoverySnapshot' OR NOT EXISTS (
+                          SELECT 1 FROM owner_truth.sources recovery_source
+                          JOIN owner_truth.live_memory_runs recovery_run
+                            ON recovery_run.vault_id=recovery_source.vault_id
+                           AND recovery_run.owner_subject_id=recovery_source.owner_subject_id
+                           AND recovery_run.authority_epoch=recovery_source.authority_epoch
+                           AND recovery_run.product_session_id=recovery_source.metadata->>'productSessionId'
+                           AND recovery_run.capture_generation=(recovery_source.metadata->>'productCaptureGeneration')::integer
+                          JOIN owner_truth.live_memory_work_units recovery_unit ON recovery_unit.run_id=recovery_run.id
+                          WHERE recovery_source.id::text=job.resource_id AND recovery_unit.kind='atomExtraction'
+                            AND recovery_unit.state IN ('planned','running')
+                      ))
+                """
             parameters.extend((normalized_worker_id, normalized_lease_seconds))
             cursor.execute(
                 f"""
@@ -746,6 +769,7 @@ class PostgresAsyncEffectLeaseRepository:
                     FROM async_effects.jobs AS job
                     WHERE job_type = ANY(%s)
                       AND cancel_requested_at IS NULL
+                      {recovery_ready_clause}
                       {live_ready_clause}
                       AND (
                           (state IN ('pending', 'retryWait') AND available_at <= NOW())

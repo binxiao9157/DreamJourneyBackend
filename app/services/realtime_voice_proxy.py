@@ -103,6 +103,7 @@ class RealtimeVoiceSessionBroker:
         authority_epoch: Optional[int] = None,
         memory_revision: Optional[int] = None,
         session_context: Optional[Mapping[str, Any]] = None,
+        diagnostic_stage: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         descriptor = self.capability_descriptor()
         if descriptor["status"] != "ready":
@@ -162,6 +163,11 @@ class RealtimeVoiceSessionBroker:
             "maxSessionSeconds": resource_profile["maxSessionSeconds"],
             "maxSessionBytes": resource_profile["maxSessionBytes"],
         }
+        if diagnostic_stage is not None:
+            try:
+                diagnostic_stage("ticketStoreBegin")
+            except Exception:
+                pass
         try:
             self.store.issue_realtime_voice_session_ticket(
                 record,
@@ -182,6 +188,12 @@ class RealtimeVoiceSessionBroker:
                     "realtimeVoiceSubjectUnavailable",
                 ) from exc
             raise
+
+        if diagnostic_stage is not None:
+            try:
+                diagnostic_stage("ticketStoreWriteComplete")
+            except Exception:
+                pass
 
         address, uri = self._public_proxy_endpoint()
         response = dict(descriptor)

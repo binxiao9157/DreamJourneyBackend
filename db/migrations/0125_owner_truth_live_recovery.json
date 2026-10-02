@@ -1,0 +1,10 @@
+{
+  "version": "0125", "name": "owner_truth_live_recovery", "phase": "expand",
+  "compatibility": "additive", "runtimeCompatibility": "ownerTruthLiveRecoveryV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {"ownerTruthLiveRecovery": false},
+  "summary": "Opt-in durable activity and close coordinates with immutable received-range snapshots. Does not migrate historical sessions.",
+  "operations": ["persist recovery deadlines", "freeze immutable partial snapshot jobs"],
+  "rollback": "Disable ownerTruthLiveRecovery. Keep all recovery records and snapshots; do not replay historical tasks.",
+  "production": {"requiresExplicitApproval": true, "requiresDryRun": true, "requiresBackup": true, "requiresPostgresIntegrationEvidence": true, "rewritesUserFacts": false, "invalidatesDerivedProjections": false}
+}

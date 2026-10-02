@@ -1,4 +1,4 @@
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 from app.core.config import Settings
 from app.services.realtime_voice_proxy import RealtimeVoiceSessionBroker
@@ -30,6 +30,7 @@ class TokenService:
         authority_epoch: Optional[int] = None,
         memory_revision: Optional[int] = None,
         session_context: Optional[Mapping[str, Any]] = None,
+        diagnostic_stage: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         return RealtimeVoiceSessionBroker(self.settings, store).issue_runtime_config(
             user_id=user_id,
@@ -44,4 +45,5 @@ class TokenService:
             authority_epoch=authority_epoch,
             memory_revision=memory_revision,
             session_context=session_context,
+            diagnostic_stage=diagnostic_stage,
         )

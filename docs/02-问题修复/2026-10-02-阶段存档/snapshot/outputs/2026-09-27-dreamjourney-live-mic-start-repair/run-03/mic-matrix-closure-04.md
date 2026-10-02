@@ -1,0 +1,29 @@
+> 历史版本说明（2026-09-29追加）：本文件保留当时结果，最新接手收尾与指纹见[唯一最新入口](../../2026-09-29-dreamjourney-live-mic-start-takeover/run-01/README.md)。原文 final-06 的“2 GET/1 GET”描述已在新报告纠正为“恢复任务数2/1”；原始失败产物保留。
+
+# MIC-01–19 continued local matrix
+
+Date: 2026-09-28. Overall **LOCAL_INCOMPLETE**. `PASS` below applies only to the named controlled local assertion; native SDK, real Provider, device, production and historical incident attribution are NOT_RUN. Earlier evidence is preserved in [mic-matrix.md](mic-matrix.md); this file records what changed after the independent run-03 review.
+
+| ID | Current local status | Exact evidence and remaining boundary |
+|---|---|---|
+| MIC-01 | PASS, controlled local | Existing Controller/Client/Gate/requestJSON same-assertion red/green in run-02; [final full bundle](evidence/all-ios-final-07.xcresult). No device claim. |
+| MIC-02 | PARTIAL | Existing single-refresh red/green and final bundle; combined Controller refresh, cumulative deadline and late-result ownership not executed. |
+| MIC-03 | PASS for deny/reason/prompt | [Controller reason and visible prompt](evidence/mic03-13-reason-prompt-04.xcresult), 2/2 including MIC-13; real deny yields zero ticket. Other independent MIC-03 paths retained from original matrix. |
+| MIC-04 | PARTIAL | Existing pending rebind/generation tests retained; first shared-refresh waiter cancellation while second completes is not proven in this MIC path. |
+| MIC-05 | PARTIAL | Existing queued callback red/green plus [production-used submission orchestration](evidence/r1-manager-final-green-07.xcresult). Full native Manager setup/callback with controlled SDK is not executed. |
+| MIC-06 | PARTIAL | Existing duplicate-completion one-ticket assertions retained; bounded distinct terminal-failure race through Controller is not proven. |
+| MIC-07 | PARTIAL | Existing account-switch during held auth, one POST, retained. Combined final Controller reason/attempt budget after rotation is not proven. |
+| MIC-08 | PARTIAL | Existing real two-ticket POST and unknown-result barrier retained; first-POST connection interruption and late first-result versus second-result arbitration not executed. Unknown write is not replayed by the tested path. |
+| MIC-09 | PARTIAL | [Held policy refresh crossing monotonic deadline](evidence/mic09-policy-deadline-04.xcresult): one timeout, late response, zero ticket. Runtime/auth/SDK wait and transport cancellation receipt in one bounded Controller chain remain unproven. |
+| MIC-10 | PARTIAL | Existing synchronous SDK config deadline and zero StartEngine retained; multi-stage cumulative and wall-clock-adjustment Controller assertion not executed. |
+| MIC-11 | PARTIAL | Existing stale runtime response red/green retained; [R1 business red](evidence/mic-r1-business-red-04.txt) and [shared production submission green](evidence/r1-manager-final-green-07.xcresult) prove the local final send guard. Complete Manager setup/callback and native ordering remain unproven; historical epoch writer not established. |
+| MIC-12 | PARTIAL | Existing healthy request count and four-scene chain retained; full deterministic Controller stage timings and ticket snapshot dimensions not independently asserted. |
+| MIC-13 | PASS for named classification/prompt branches | Existing 429/malformed/503 Client/Gate/Controller response matrix plus [visible prompt assertions](evidence/mic03-13-reason-prompt-04.xcresult). No assertion about every possible error class. |
+| MIC-14 | PASS for tested local branches | Existing first-error persistence and cross-request latestDecision isolation retained. [Unwritable diagnostic disk with Controller/capture](evidence/mic14-19-controller-unwritable-04.xcresult), 1/1, leaves original A disk record intact. Active-A draining is MIC-19's separate gap. |
+| MIC-15 | PASS for named PG branches | Existing clean isolated PG binding, single consume and rollback; [same-owner concurrent ticket and cross-owner 403](evidence/mic15-concurrent-identity-result-04.json) used default API and isolated PG. Not production DB. |
+| MIC-16 | PASS for finite local diagnostic mechanism | Existing bounded ASGI ticket/live/heartbeat, same trace stages and stacks retained. Precise historical near-minute inner wait remains unresolved and is not a local PASS claim. |
+| MIC-17 | PASS for previously tested local preservation; external NOT_RUN | [Final iOS bundle](evidence/all-ios-final-07.xcresult) and [four-scene chain](four-scene-final-04/artifacts/runner-complete.json). Native SDK audio/acoustics, long answer, device interruption remain NOT_RUN. |
+| MIC-18 | PASS, controlled local | [Final four-scene runner](four-scene-final-04/artifacts/runner-complete.json) short-A → logical20 → short-B → logical65; candidate visibility, review/formal memory and API-rebuild readback in [20](four-scene-final-04/green/logical20-full-chain.json) and [65](four-scene-final-04/green/logical65-full-chain.json). Physical duration and real Provider NOT_RUN. |
+| MIC-19 | PARTIAL / activity branch FAIL | [Static A/capture and unwritable diagnostic isolation](evidence/mic14-19-controller-unwritable-04.xcresult) passes. [Attempted active-A/B-failure fixture](evidence/mic19-active-a-first-04.xcresult) failed to reach B SDK failure or observe A end; [restored baseline](evidence/mic19-restored-baseline-04.xcresult) passes but does not prove active A. B normal close and active-A/B-failure remain unexecuted. |
+
+R1 source-excerpt red is an isolated reconstruction, not a complete historical or native Manager replay. Final iOS suite: 771 passed, 0 failed, 3 skipped; an earlier one-test recovery GET-count failure and subsequent isolated/final pass are both retained in [closure report](closure-report-04.md). The complete MIC local gate remains incomplete because the R2/R3 combinations and specified R4 cumulative/shared-waiter cases have not all passed.

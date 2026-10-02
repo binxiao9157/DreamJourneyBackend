@@ -198,6 +198,30 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         service_payload = TokenService(settings).realtime_config(user_id=user_id)
         self.assertEqual(service_payload, body)
 
+    def test_realtime_voice_launch_trace_accepts_only_canonical_uuid(self):
+        headers, user_id = self.user_headers("13800139905")
+        trace = "aa5e0c69-1c1f-442a-aedc-307351242199"
+        allowed = client.post(
+            "/voice/realtime-token",
+            headers={**headers, "X-DreamJourney-Live-Launch-Trace": trace},
+            json={"userId": user_id},
+        )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.headers["X-DreamJourney-Live-Launch-Trace"], trace)
+        rejected = client.post(
+            "/voice/realtime-token",
+            headers={**headers, "X-DreamJourney-Live-Launch-Trace": "private-text-not-a-trace"},
+            json={"userId": user_id},
+        )
+        self.assertEqual(rejected.status_code, 200)
+        self.assertNotEqual(
+            rejected.headers["X-DreamJourney-Live-Launch-Trace"],
+            "private-text-not-a-trace",
+        )
+        from uuid import UUID
+
+        UUID(rejected.headers["X-DreamJourney-Live-Launch-Trace"])
+
     def test_realtime_voice_ready_contract_returns_only_one_time_proxy_ticket(self):
         object.__setattr__(settings, "public_base_url", "https://api.example.test/dreamjourney-api")
         object.__setattr__(settings, "realtime_voice_proxy_enabled", True)
@@ -229,12 +253,13 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
         with patch(
             "app.main.FormalMemoryConversationSnapshotService.build",
             return_value=snapshot,
-        ):
+        ), self.assertLogs("app.main.voice_launch", level="INFO") as launch_logs:
             response = client.post(
                 "/voice/realtime-token",
                 headers=headers,
                 json={"userId": user_id},
             )
+            self.assertTrue(main_module.VOICE_LAUNCH_DIAGNOSTICS.wait_for_idle())
 
         self.assertEqual(response.status_code, 200)
         self.assert_no_store(response)
@@ -249,6 +274,15 @@ class CredentialResponseBoundaryTests(unittest.TestCase):
             0,
         )
         self.assert_value_free(body)
+        launch_stages = "\n".join(launch_logs.output)
+        for stage in (
+            "inbound", "ownerAuthorized", "sessionAuthorized", "capabilityReady",
+            "snapshotBound", "ticketStoreWriteComplete", "ticketResponsePrepared",
+            "responseReady",
+        ):
+            self.assertIn(f"stage={stage}", launch_stages)
+        self.assertNotIn(body["proxy"]["sessionToken"], launch_stages)
+        self.assertNotIn(user_id, launch_stages)
 
     def test_realtime_voice_snapshot_failure_returns_and_logs_safe_business_code(self):
         object.__setattr__(

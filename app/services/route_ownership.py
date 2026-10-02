@@ -880,6 +880,27 @@ class RouteOwnershipRegistry:
                 session,
                 "ownerTruthInterviewSessionStart",
             ),
+            _rule("GET", "/v2/vaults/{vault_id}/live-memory-themes",session,"ownerTruthLiveThemeList"),
+            _rule("POST", "/v2/vaults/{vault_id}/live-memory-themes/{topic_id}/preview",session,"ownerTruthLiveThemePreview"),
+            _rule("POST", "/v2/vaults/{vault_id}/live-memory-themes/{topic_id}/confirm",session,"ownerTruthLiveThemeConfirm"),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/recovery-publication",
+                session,
+                "ownerTruthLiveRecoveryPublication",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/recovery/messages",
+                session,
+                "ownerTruthLiveRecoveryAppend",
+            ),
+            _rule(
+                "POST",
+                "/v2/vaults/{vault_id}/interview-sessions/{session_id}/recovery",
+                session,
+                "ownerTruthLiveRecoveryControl",
+            ),
             _rule(
                 "POST",
                 "/v2/vaults/{vault_id}/interview-sessions/{session_id}/messages",

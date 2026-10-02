@@ -222,9 +222,18 @@ class CreateTextSourceCommand:
                 source_kind is not SourceKind.CONVERSATION
                 or normalized_metadata.get("captureMode") != "live"
                 or normalized_metadata.get("sourcePolicy") != "userEvidenceOnly"
-                or normalized_metadata.get("origin")
-                != "interviewReviewBatchCandidateProposal"
-                or not str(normalized_metadata.get("reviewBatchId") or "").strip()
+                or not (
+                    (normalized_metadata.get("origin") == "interviewReviewBatchCandidateProposal"
+                     and str(normalized_metadata.get("reviewBatchId") or "").strip())
+                    or (normalized_metadata.get("origin") == "liveRecoverySnapshot"
+                        and normalized_metadata.get("recoveryProtocol") == "live-recovery-v1"
+                        and str(normalized_metadata.get("snapshotId") or "").strip()
+                        and type(normalized_metadata.get("snapshotRevision")) is int
+                        and normalized_metadata["snapshotRevision"] > 0
+                        and type(normalized_metadata.get("endPositionKnown")) is bool
+                        and isinstance(normalized_metadata.get("receivedRanges"), list)
+                        and isinstance(normalized_metadata.get("missingRanges"), list))
+                )
             ):
                 raise OwnerTruthContractError(
                     "trusted Live source capacity requires server-admitted Live metadata"

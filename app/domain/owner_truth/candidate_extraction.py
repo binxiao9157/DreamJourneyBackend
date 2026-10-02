@@ -135,6 +135,7 @@ class CandidateProposal:
     confidence: float
     review_mode: CandidateReviewMode
     payload_schema_version: str = OWNER_TRUTH_SCHEMA_VERSION
+    correction_of_memory_version_id: str | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -197,6 +198,8 @@ class CandidateProposal:
             "reviewMode": self.review_mode.value,
             "sensitivity": self.sensitivity.value,
         }
+        if self.correction_of_memory_version_id is not None:
+            proposal_body['correctionOfMemoryVersionId']=str(UUID(self.correction_of_memory_version_id))
         proposal_hash = _digest(proposal_body)
         candidate_id = str(uuid5(_CANDIDATE_NAMESPACE, f"{normalized_extraction_id}:{proposal_hash}"))
         payload = {

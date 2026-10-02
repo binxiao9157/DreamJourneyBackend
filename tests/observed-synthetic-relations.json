@@ -1,0 +1,536 @@
+{
+  "none": {
+    "material": {
+      "atoms": [
+        {
+          "atomId": "aa63e0d3-9ee3-4ff6-ac2a-52dc43daac9a",
+          "content": {
+            "memoryKind": "experience",
+            "summary": "我2024年第一次在上海参加马拉松，跑了十公里。",
+            "sourceTurnIndices": [
+              2
+            ],
+            "dimensions": [
+              "knowledgeSkills"
+            ]
+          },
+          "contentHash": "6911f22f37cdb7d59c9238f89899308fa895435fde9ce6b859b8d29e6b7944b0",
+          "dimensions": [
+            "knowledgeSkills"
+          ],
+          "supportState": "supported",
+          "evidenceIds": [
+            "5c4c45685e5d8a0e07caa695905b4d66e4d1d74df8c1837635de963d82f9a036"
+          ],
+          "evidence": [
+            {
+              "evidenceId": "5c4c45685e5d8a0e07caa695905b4d66e4d1d74df8c1837635de963d82f9a036",
+              "messageId": "f62194b3-b27e-4625-8e96-55d7713b8fca",
+              "turnIndex": 2,
+              "start": 0,
+              "end": 24,
+              "textHash": "8b53e6eef9d773e1ffb536fcedef6d79f40c25ab7c19d245a77d2945e5195968",
+              "text": "我2024年第一次在上海参加马拉松，跑了十公里。"
+            }
+          ]
+        }
+      ],
+      "theme": {
+        "schemaVersion": "owner-truth-live-theme-v1",
+        "key": "study",
+        "title": "求学",
+        "summary": "我2024年第一次在上海参加马拉松，跑了十公里。",
+        "atomIds": [
+          "aa63e0d3-9ee3-4ff6-ac2a-52dc43daac9a"
+        ],
+        "evidenceIds": [
+          "5c4c45685e5d8a0e07caa695905b4d66e4d1d74df8c1837635de963d82f9a036"
+        ],
+        "dimensions": [
+          "knowledgeSkills"
+        ],
+        "supportHash": "b54ed9760f83ecc1e66b179535ad821d4cc4ba614075b4fa044729bc2862e83b"
+      },
+      "targets": [
+        {
+          "topicId": "6001a151-07e1-4720-a993-d904174471f2",
+          "version": 1,
+          "proposalHash": "a868e167d1843bf9f0e1f26d49caf4f5241bf981e2822525eaa5f6ce80c3d5e7",
+          "state": "pending",
+          "theme": {
+            "schemaVersion": "owner-truth-live-theme-v1",
+            "key": "study",
+            "title": "求学",
+            "summary": "我2025年在杭州读书。",
+            "atomIds": [
+              "0d954b37-ca3f-425f-9f32-b4ae00979b6f"
+            ],
+            "evidenceIds": [
+              "5c68558ef980f72856ff57bcf9e1b037bd42a77b316fba84685261b1c451c7a9"
+            ],
+            "dimensions": [
+              "knowledgeSkills"
+            ],
+            "supportHash": "b54ed9760f83ecc1e66b179535ad821d4cc4ba614075b4fa044729bc2862e83b"
+          },
+          "atoms": [
+            {
+              "atomId": "0d954b37-ca3f-425f-9f32-b4ae00979b6f",
+              "content": {
+                "memoryKind": "experience",
+                "summary": "我2025年在杭州读书。",
+                "sourceTurnIndices": [
+                  1
+                ],
+                "dimensions": [
+                  "knowledgeSkills"
+                ]
+              },
+              "contentHash": "eac2ad3c3ce6fb41b531e1263e0dc582229735c1c0437c050036a13053d7358d",
+              "dimensions": [
+                "knowledgeSkills"
+              ],
+              "supportState": "supported",
+              "evidenceIds": [
+                "5c68558ef980f72856ff57bcf9e1b037bd42a77b316fba84685261b1c451c7a9"
+              ],
+              "evidence": [
+                {
+                  "evidenceId": "5c68558ef980f72856ff57bcf9e1b037bd42a77b316fba84685261b1c451c7a9",
+                  "messageId": "0319e610-9352-44e8-a4e1-85882c8e7b42",
+                  "turnIndex": 1,
+                  "start": 0,
+                  "end": 12,
+                  "textHash": "2a2b48579727549447d4541f764a9168411d75d305e56ab5d5b0a28a3d77d12e",
+                  "text": "我2025年在杭州读书。"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "proposal": {
+      "inputHash": "880de0b294b4955cc46e3dc9c40b4816b279195d27da3d5ab0a06237ca213a2c",
+      "relation": "none",
+      "schemaVersion": "owner-truth-live-theme-relation-v1",
+      "targetTopicId": null
+    },
+    "review": {
+      "compatibleTime": true,
+      "correctionsResolved": false,
+      "inputHash": "880de0b294b4955cc46e3dc9c40b4816b279195d27da3d5ab0a06237ca213a2c",
+      "proposalHash": "780aad7c742ba03789e0fb49b7c8246af3c787659104a0a386b7d7c4246e3ed9",
+      "sameSubjectEvent": false,
+      "schemaVersion": "owner-truth-live-theme-relation-support-v1",
+      "summarySupported": true,
+      "verdict": "supported"
+    }
+  },
+  "duplicate": {
+    "material": {
+      "atoms": [
+        {
+          "atomId": "d5bd1ded-ec0e-4870-a61e-5335ee169031",
+          "content": {
+            "memoryKind": "experience",
+            "summary": "我2025年在杭州读书。",
+            "sourceTurnIndices": [
+              2
+            ],
+            "dimensions": [
+              "knowledgeSkills"
+            ]
+          },
+          "contentHash": "418bece980765252e1a37ee8a41a2509bcacfca58e4925e9d2f4f4b69ee1b9f5",
+          "dimensions": [
+            "knowledgeSkills"
+          ],
+          "supportState": "supported",
+          "evidenceIds": [
+            "4650c330b52b3670f0e58a14dedcb69246ead26e3feff1ddce7e20ebdd72f32a"
+          ],
+          "evidence": [
+            {
+              "evidenceId": "4650c330b52b3670f0e58a14dedcb69246ead26e3feff1ddce7e20ebdd72f32a",
+              "messageId": "539b48ad-7aca-4ded-b410-37e596903502",
+              "turnIndex": 2,
+              "start": 0,
+              "end": 12,
+              "textHash": "2a2b48579727549447d4541f764a9168411d75d305e56ab5d5b0a28a3d77d12e",
+              "text": "我2025年在杭州读书。"
+            }
+          ]
+        }
+      ],
+      "theme": {
+        "schemaVersion": "owner-truth-live-theme-v1",
+        "key": "study",
+        "title": "求学",
+        "summary": "我2025年在杭州读书。",
+        "atomIds": [
+          "d5bd1ded-ec0e-4870-a61e-5335ee169031"
+        ],
+        "evidenceIds": [
+          "4650c330b52b3670f0e58a14dedcb69246ead26e3feff1ddce7e20ebdd72f32a"
+        ],
+        "dimensions": [
+          "knowledgeSkills"
+        ],
+        "supportHash": "b54ed9760f83ecc1e66b179535ad821d4cc4ba614075b4fa044729bc2862e83b"
+      },
+      "targets": [
+        {
+          "topicId": "fbe8aa09-ab24-4bf8-b846-be1e6f19ef31",
+          "version": 1,
+          "proposalHash": "a868e167d1843bf9f0e1f26d49caf4f5241bf981e2822525eaa5f6ce80c3d5e7",
+          "state": "pending",
+          "theme": {
+            "schemaVersion": "owner-truth-live-theme-v1",
+            "key": "study",
+            "title": "求学",
+            "summary": "我2025年在杭州读书。",
+            "atomIds": [
+              "c2058a1b-8cad-4620-8e23-d5d1c2e9377c"
+            ],
+            "evidenceIds": [
+              "dc9a230be22cfad778c42247c4ffaa954815f51f2d73dce26ee05aec0a674ba9"
+            ],
+            "dimensions": [
+              "knowledgeSkills"
+            ],
+            "supportHash": "b54ed9760f83ecc1e66b179535ad821d4cc4ba614075b4fa044729bc2862e83b"
+          },
+          "atoms": [
+            {
+              "atomId": "c2058a1b-8cad-4620-8e23-d5d1c2e9377c",
+              "content": {
+                "memoryKind": "experience",
+                "summary": "我2025年在杭州读书。",
+                "sourceTurnIndices": [
+                  1
+                ],
+                "dimensions": [
+                  "knowledgeSkills"
+                ]
+              },
+              "contentHash": "eac2ad3c3ce6fb41b531e1263e0dc582229735c1c0437c050036a13053d7358d",
+              "dimensions": [
+                "knowledgeSkills"
+              ],
+              "supportState": "supported",
+              "evidenceIds": [
+                "dc9a230be22cfad778c42247c4ffaa954815f51f2d73dce26ee05aec0a674ba9"
+              ],
+              "evidence": [
+                {
+                  "evidenceId": "dc9a230be22cfad778c42247c4ffaa954815f51f2d73dce26ee05aec0a674ba9",
+                  "messageId": "600a45db-2c57-456a-ad87-29fb0796b708",
+                  "turnIndex": 1,
+                  "start": 0,
+                  "end": 12,
+                  "textHash": "2a2b48579727549447d4541f764a9168411d75d305e56ab5d5b0a28a3d77d12e",
+                  "text": "我2025年在杭州读书。"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "proposal": {
+      "inputHash": "d362fa4244d95204adaa9f699ce7b0aca22bdae915ca22e2965a4eafc68c305a",
+      "relation": "duplicate",
+      "schemaVersion": "owner-truth-live-theme-relation-v1",
+      "targetTopicId": "fbe8aa09-ab24-4bf8-b846-be1e6f19ef31",
+      "targetVersion": 1,
+      "targetHash": "a868e167d1843bf9f0e1f26d49caf4f5241bf981e2822525eaa5f6ce80c3d5e7",
+      "duplicateAtomIds": [
+        "d5bd1ded-ec0e-4870-a61e-5335ee169031"
+      ],
+      "replaces": {},
+      "title": "求学",
+      "summary": "我2025年在杭州读书。"
+    },
+    "review": {
+      "compatibleTime": true,
+      "correctionsResolved": false,
+      "inputHash": "d362fa4244d95204adaa9f699ce7b0aca22bdae915ca22e2965a4eafc68c305a",
+      "proposalHash": "bb60195724cd425f75d0b5954713f77cafa8d8875e0d9d3e58574553c95bcfb1",
+      "sameSubjectEvent": true,
+      "schemaVersion": "owner-truth-live-theme-relation-support-v1",
+      "summarySupported": true,
+      "verdict": "supported"
+    }
+  },
+  "supplement": {
+    "material": {
+      "atoms": [
+        {
+          "atomId": "58a60a36-b2b9-4c2c-9abe-1bd7a91efc8e",
+          "content": {
+            "memoryKind": "experience",
+            "summary": "补充我2025年在杭州读书的经历：当时每个周末我都会在学校学习绘画。",
+            "sourceTurnIndices": [
+              2
+            ],
+            "dimensions": [
+              "knowledgeSkills"
+            ]
+          },
+          "contentHash": "911e1d0495ac48ba39941f402d6a94a12e75a8eba22bb1a0162dee47eb58c9f9",
+          "dimensions": [
+            "knowledgeSkills"
+          ],
+          "supportState": "supported",
+          "evidenceIds": [
+            "569dca8f7c80faf6e9f8aeaaa80d8094c45ff649435a87c8ef785f8bdfececa6"
+          ],
+          "evidence": [
+            {
+              "evidenceId": "569dca8f7c80faf6e9f8aeaaa80d8094c45ff649435a87c8ef785f8bdfececa6",
+              "messageId": "7792c3bd-5124-461c-b478-1c639f79c904",
+              "turnIndex": 2,
+              "start": 0,
+              "end": 34,
+              "textHash": "1134a322ccdc41571521fb7937cdf7c6ac93862dc03282253dd5c4c1a06632b1",
+              "text": "补充我2025年在杭州读书的经历：当时每个周末我都会在学校学习绘画。"
+            }
+          ]
+        }
+      ],
+      "theme": {
+        "schemaVersion": "owner-truth-live-theme-v1",
+        "key": "study",
+        "title": "求学",
+        "summary": "补充我2025年在杭州读书的经历：当时每个周末我都会在学校学习绘画。",
+        "atomIds": [
+          "58a60a36-b2b9-4c2c-9abe-1bd7a91efc8e"
+        ],
+        "evidenceIds": [
+          "569dca8f7c80faf6e9f8aeaaa80d8094c45ff649435a87c8ef785f8bdfececa6"
+        ],
+        "dimensions": [
+          "knowledgeSkills"
+        ],
+        "supportHash": "b54ed9760f83ecc1e66b179535ad821d4cc4ba614075b4fa044729bc2862e83b"
+      },
+      "targets": [
+        {
+          "topicId": "8765d893-6d44-471c-979a-fb76c25bf874",
+          "version": 1,
+          "proposalHash": "a868e167d1843bf9f0e1f26d49caf4f5241bf981e2822525eaa5f6ce80c3d5e7",
+          "state": "pending",
+          "theme": {
+            "schemaVersion": "owner-truth-live-theme-v1",
+            "key": "study",
+            "title": "求学",
+            "summary": "我2025年在杭州读书。",
+            "atomIds": [
+              "0293c1db-68ef-4ed8-af01-414232b8225a"
+            ],
+            "evidenceIds": [
+              "b666cc0a25f571328dca909f15e462fca4a85637564d016ce281927dde336502"
+            ],
+            "dimensions": [
+              "knowledgeSkills"
+            ],
+            "supportHash": "b54ed9760f83ecc1e66b179535ad821d4cc4ba614075b4fa044729bc2862e83b"
+          },
+          "atoms": [
+            {
+              "atomId": "0293c1db-68ef-4ed8-af01-414232b8225a",
+              "content": {
+                "memoryKind": "experience",
+                "summary": "我2025年在杭州读书。",
+                "sourceTurnIndices": [
+                  1
+                ],
+                "dimensions": [
+                  "knowledgeSkills"
+                ]
+              },
+              "contentHash": "eac2ad3c3ce6fb41b531e1263e0dc582229735c1c0437c050036a13053d7358d",
+              "dimensions": [
+                "knowledgeSkills"
+              ],
+              "supportState": "supported",
+              "evidenceIds": [
+                "b666cc0a25f571328dca909f15e462fca4a85637564d016ce281927dde336502"
+              ],
+              "evidence": [
+                {
+                  "evidenceId": "b666cc0a25f571328dca909f15e462fca4a85637564d016ce281927dde336502",
+                  "messageId": "877645b1-3123-4eac-9e51-7e1bada5b118",
+                  "turnIndex": 1,
+                  "start": 0,
+                  "end": 12,
+                  "textHash": "2a2b48579727549447d4541f764a9168411d75d305e56ab5d5b0a28a3d77d12e",
+                  "text": "我2025年在杭州读书。"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "proposal": {
+      "inputHash": "17272536a15adfd6dfc520684aec55f0403d7caeafaf3ae9563bccfbe24dee06",
+      "relation": "supplement",
+      "schemaVersion": "owner-truth-live-theme-relation-v1",
+      "targetTopicId": "8765d893-6d44-471c-979a-fb76c25bf874",
+      "targetVersion": 1,
+      "targetHash": "a868e167d1843bf9f0e1f26d49caf4f5241bf981e2822525eaa5f6ce80c3d5e7",
+      "duplicateAtomIds": [],
+      "replaces": {},
+      "title": "杭州求学期间周末在校学习绘画",
+      "summary": "保留旧事实：我2025年在杭州读书。新增事实：当时每个周末我都会在学校学习绘画。"
+    },
+    "review": {
+      "compatibleTime": true,
+      "correctionsResolved": false,
+      "inputHash": "17272536a15adfd6dfc520684aec55f0403d7caeafaf3ae9563bccfbe24dee06",
+      "proposalHash": "38a4e3f0b547385c205eca01ff5d6334ef87d2d20761523d6979022bce5eada7",
+      "sameSubjectEvent": true,
+      "schemaVersion": "owner-truth-live-theme-relation-support-v1",
+      "summarySupported": true,
+      "verdict": "supported"
+    }
+  },
+  "correction": {
+    "material": {
+      "atoms": [
+        {
+          "atomId": "18ecb412-1846-440f-be92-9bc552076153",
+          "content": {
+            "memoryKind": "experience",
+            "summary": "更正一下：我2025年是在苏州读书，不是在杭州读书。",
+            "sourceTurnIndices": [
+              2
+            ],
+            "dimensions": [
+              "knowledgeSkills"
+            ]
+          },
+          "contentHash": "a03e619dc81fb9f682c1cca9a9ade87ff63b63551d7bd257020208e58a0a91fb",
+          "dimensions": [
+            "knowledgeSkills"
+          ],
+          "supportState": "supported",
+          "evidenceIds": [
+            "04b983bf205d2e7938a5b8d19aa5273c0890a17fcbdd92eba45a58b4afb35b99"
+          ],
+          "evidence": [
+            {
+              "evidenceId": "04b983bf205d2e7938a5b8d19aa5273c0890a17fcbdd92eba45a58b4afb35b99",
+              "messageId": "75789257-65b5-4124-9ec4-eb095d0fe076",
+              "turnIndex": 2,
+              "start": 0,
+              "end": 26,
+              "textHash": "eb1e6f0b77eba9970b65c6f15743d23d542046e0cacf11a862a4887bc2ab4ddd",
+              "text": "更正一下：我2025年是在苏州读书，不是在杭州读书。"
+            }
+          ]
+        }
+      ],
+      "theme": {
+        "schemaVersion": "owner-truth-live-theme-v1",
+        "key": "study",
+        "title": "求学",
+        "summary": "更正一下：我2025年是在苏州读书，不是在杭州读书。",
+        "atomIds": [
+          "18ecb412-1846-440f-be92-9bc552076153"
+        ],
+        "evidenceIds": [
+          "04b983bf205d2e7938a5b8d19aa5273c0890a17fcbdd92eba45a58b4afb35b99"
+        ],
+        "dimensions": [
+          "knowledgeSkills"
+        ],
+        "supportHash": "b54ed9760f83ecc1e66b179535ad821d4cc4ba614075b4fa044729bc2862e83b"
+      },
+      "targets": [
+        {
+          "topicId": "0a58deaa-f081-491d-9d60-cef1492c77f1",
+          "version": 1,
+          "proposalHash": "a868e167d1843bf9f0e1f26d49caf4f5241bf981e2822525eaa5f6ce80c3d5e7",
+          "state": "pending",
+          "theme": {
+            "schemaVersion": "owner-truth-live-theme-v1",
+            "key": "study",
+            "title": "求学",
+            "summary": "我2025年在杭州读书。",
+            "atomIds": [
+              "2890e02e-5cb2-4999-baf3-a50e8683d868"
+            ],
+            "evidenceIds": [
+              "f68bdf0dc61a7fba62c88d5495f5277c701a417f1bdb0bf78ffaa542664e5078"
+            ],
+            "dimensions": [
+              "knowledgeSkills"
+            ],
+            "supportHash": "b54ed9760f83ecc1e66b179535ad821d4cc4ba614075b4fa044729bc2862e83b"
+          },
+          "atoms": [
+            {
+              "atomId": "2890e02e-5cb2-4999-baf3-a50e8683d868",
+              "content": {
+                "memoryKind": "experience",
+                "summary": "我2025年在杭州读书。",
+                "sourceTurnIndices": [
+                  1
+                ],
+                "dimensions": [
+                  "knowledgeSkills"
+                ]
+              },
+              "contentHash": "eac2ad3c3ce6fb41b531e1263e0dc582229735c1c0437c050036a13053d7358d",
+              "dimensions": [
+                "knowledgeSkills"
+              ],
+              "supportState": "supported",
+              "evidenceIds": [
+                "f68bdf0dc61a7fba62c88d5495f5277c701a417f1bdb0bf78ffaa542664e5078"
+              ],
+              "evidence": [
+                {
+                  "evidenceId": "f68bdf0dc61a7fba62c88d5495f5277c701a417f1bdb0bf78ffaa542664e5078",
+                  "messageId": "979a6902-340f-49be-86c9-ba7f8b87a569",
+                  "turnIndex": 1,
+                  "start": 0,
+                  "end": 12,
+                  "textHash": "2a2b48579727549447d4541f764a9168411d75d305e56ab5d5b0a28a3d77d12e",
+                  "text": "我2025年在杭州读书。"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "proposal": {
+      "inputHash": "cf3c55f6705e04e841767d8e14e96c332b2272fbec02e6109b53e87c975b85c4",
+      "relation": "correction",
+      "schemaVersion": "owner-truth-live-theme-relation-v1",
+      "targetTopicId": "0a58deaa-f081-491d-9d60-cef1492c77f1",
+      "targetVersion": 1,
+      "targetHash": "a868e167d1843bf9f0e1f26d49caf4f5241bf981e2822525eaa5f6ce80c3d5e7",
+      "duplicateAtomIds": [],
+      "replaces": {
+        "18ecb412-1846-440f-be92-9bc552076153": "2890e02e-5cb2-4999-baf3-a50e8683d868"
+      },
+      "title": "求学地点更正",
+      "summary": "保留旧事实：2025年在杭州读书。新增/纠正事实：2025年是在苏州读书，不是在杭州读书。"
+    },
+    "review": {
+      "compatibleTime": true,
+      "correctionsResolved": true,
+      "inputHash": "cf3c55f6705e04e841767d8e14e96c332b2272fbec02e6109b53e87c975b85c4",
+      "proposalHash": "937c988bf75a833c0ffc1d57e508ee6ee734c71bcf6bb637ed6f34850cf22596",
+      "sameSubjectEvent": true,
+      "schemaVersion": "owner-truth-live-theme-relation-support-v1",
+      "summarySupported": false,
+      "verdict": "unsupported"
+    }
+  }
+}

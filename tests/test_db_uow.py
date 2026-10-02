@@ -113,6 +113,7 @@ class DatabaseUnitOfWorkTests(unittest.TestCase):
         self.assertEqual(connection.rollbacks, 0)
         self.assertEqual(pool.returned, [connection])
         self.assertEqual(metrics.snapshot()["committed"], 1)
+        self.assertTrue(uow.committed)
 
     def test_exception_and_rollback_only_never_commit(self):
         failed = FakeConnection("failed")
@@ -141,6 +142,7 @@ class DatabaseUnitOfWorkTests(unittest.TestCase):
         self.assertEqual(rollback_only.rollbacks, 1)
         self.assertEqual(rollback_only.commits, 0)
         self.assertEqual(metrics.snapshot()["rolledBack"], 2)
+        self.assertFalse(uow.committed)
 
     def test_pool_exhaustion_is_counted_without_fallback_connection(self):
         pool = RecordingPool([])
@@ -252,6 +254,30 @@ class DatabaseRequestUnitOfWorkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.commits, 1)
         self.assertEqual(connection.rollbacks, 0)
         self.assertEqual(len(response.headers["X-DreamJourney-Correlation-Id"]), 32)
+
+    async def test_voice_ticket_rollback_only_never_logs_committed(self):
+        connection = FakeConnection("voice-rollback-only")
+        store = PostgresStore(pool=RecordingPool([connection]))
+        request = self._request("/voice/realtime-token")
+        request.state = SimpleNamespace(
+            voice_ticket_write_complete=True,
+            voice_launch_started_at=1.0,
+        )
+        logged = []
+
+        async def call_next(_request):
+            store._current_uow.get().mark_rollback("syntheticRollbackOnly")
+            return SimpleNamespace(status_code=200, headers={})
+
+        with (
+            patch.object(main_module, "store", store),
+            patch.object(main_module, "_log_voice_launch_stage", side_effect=lambda _, stage, *__: logged.append(stage)),
+        ):
+            await database_request_unit_of_work(request, call_next)
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertNotIn("ticketStoreCommitted", logged)
 
     async def test_error_response_rolls_back(self):
         connection = FakeConnection("http-error")

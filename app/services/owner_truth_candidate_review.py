@@ -1950,6 +1950,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
                   AND s.owner_subject_id = %s
                   AND s.authority_epoch = %s
                   AND s.state = 'active'
+                  AND COALESCE(s.metadata->>'origin','') <> 'liveRecoverySnapshot'
                 ORDER BY c.created_at ASC, c.id ASC
                 """,
                 (
@@ -3964,7 +3965,7 @@ class PostgresOwnerTruthCandidateReviewRepository:
             raise OwnerTruthCandidateReviewSourceInactive("Candidate authority epoch is stale")
         cursor.execute(
             """
-            SELECT owner_subject_id, authority_epoch, state, source_version
+            SELECT owner_subject_id, authority_epoch, state, source_version, metadata
             FROM owner_truth.sources
             WHERE vault_id = %s AND id = %s
             FOR SHARE
@@ -3983,6 +3984,10 @@ class PostgresOwnerTruthCandidateReviewRepository:
             )
         ):
             raise OwnerTruthCandidateReviewSourceInactive("Candidate Source is no longer active")
+        if (source.get("metadata") or {}).get("origin")=="liveRecoverySnapshot":
+            allowed=getattr(self,"_live_theme_member_scope",{})
+            if allowed.get(candidate.candidate_id)!=candidate.payload.get("proposalHash"):
+                raise OwnerTruthCandidateReviewConflict("Live theme requires its current visible group revision")
 
     @staticmethod
     def _assert_candidate_has_no_receipt(cursor: Any, *, candidate: OwnerTruthCandidateSnapshot) -> None:

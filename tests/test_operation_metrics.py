@@ -279,6 +279,7 @@ class OperationMetricFastAPITests(unittest.TestCase):
             )
             docs = client.get("/docs")
         finally:
+            self.assertTrue(main_module.OPERATION_METRIC_DISPATCHER.wait_for_idle(2))
             main_module.OPERATION_METRIC_RECORDER = previous
 
         summary = recorder.summary()
@@ -317,6 +318,7 @@ class OperationMetricFastAPITests(unittest.TestCase):
                 },
             )
         finally:
+            self.assertTrue(main_module.OPERATION_METRIC_DISPATCHER.wait_for_idle(2))
             main_module.OPERATION_METRIC_RECORDER = previous
 
         records = list(store._evidence_events.values())
@@ -345,6 +347,7 @@ class OperationMetricFastAPITests(unittest.TestCase):
         try:
             response = TestClient(main_module.app).get("/health")
         finally:
+            self.assertTrue(main_module.OPERATION_METRIC_DISPATCHER.wait_for_idle(2))
             main_module.OPERATION_METRIC_RECORDER = previous
 
         self.assertEqual(response.status_code, 200)
@@ -371,6 +374,7 @@ class OperationMetricFastAPITests(unittest.TestCase):
                 "/ops/release-policy/observations"
             )
         finally:
+            self.assertTrue(main_module.OPERATION_METRIC_DISPATCHER.wait_for_idle(2))
             main_module.OPERATION_METRIC_RECORDER = previous
 
         summary = recorder.summary()
@@ -400,6 +404,7 @@ class OperationMetricFastAPITests(unittest.TestCase):
                 headers={"X-DreamJourney-Feedback-State": "missing"},
             )
         finally:
+            self.assertTrue(main_module.OPERATION_METRIC_DISPATCHER.wait_for_idle(2))
             main_module.OPERATION_METRIC_RECORDER = previous
 
         summary = recorder.summary()
@@ -429,11 +434,13 @@ class OperationMetricFastAPITests(unittest.TestCase):
         try:
             client = TestClient(main_module.app)
             health = client.get("/health")
+            self.assertTrue(main_module.OPERATION_METRIC_DISPATCHER.wait_for_idle(2))
             observations = client.get(
                 "/ops/release-policy/observations",
                 headers={"Authorization": "Bearer operation-metrics-machine-token"},
             )
         finally:
+            self.assertTrue(main_module.OPERATION_METRIC_DISPATCHER.wait_for_idle(2))
             main_module.OPERATION_METRIC_RECORDER = previous_recorder
             main_module.BACKEND_API_TOKEN = previous_token
 

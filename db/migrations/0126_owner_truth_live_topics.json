@@ -1,0 +1,25 @@
+{
+  "version": "0126",
+  "name": "owner_truth_live_topics",
+  "phase": "expand",
+  "compatibility": "additive",
+  "runtimeCompatibility": "ownerTruthLiveRecoveryV1",
+  "requiresOldWorkerDrain": false,
+  "releaseFlags": {
+    "ownerTruthLiveRecovery": false
+  },
+  "summary": "Immutable compound theme revisions over V5 candidate members; no new reviewing state.",
+  "operations": [
+    "persist topic revision and member identity",
+    "bind immutable V5 member proposals"
+  ],
+  "rollback": "Disable ownerTruthLiveRecovery. Keep all recovery records and snapshots; do not replay historical tasks.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": false
+  }
+}

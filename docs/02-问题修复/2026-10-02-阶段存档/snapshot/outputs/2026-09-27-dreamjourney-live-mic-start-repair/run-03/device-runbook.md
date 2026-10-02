@@ -1,0 +1,11 @@
+# Later device and release runbook (NOT_RUN)
+
+This is a prepared checklist, not authorization to install, deploy or begin a phone test. Keep the current local status and separate production authorization.
+
+1. Freeze the exact backend/iOS source, configuration, signing and release manifest. Deploy backend before iOS only after approval. Verify the configured Provider account and actual service response without placing credentials in logs or chat. A ticket HTTP 200 or SDK connect acknowledgement alone is not a Live pass.
+2. On the user-authorized iPhone, first test one **short Live with two user rounds**: round two supplements a fact from round one. Measure tap, permission, policy/runtime/auth, ticket and SDK stages with one attempt trace. Verify actual spoken response, automatic listening return, stop, same-scene candidate visibility, user confirmation, formal-memory content and app-restart readback. If it fails, stop; do not proceed to long Live or repeatedly create tickets.
+3. Only after that short gate, perform a physical 20-minute conversation with first/middle/late facts and a supplement/correction. Check progressive transcript, closure, candidate evidence and deduplication, review to formal memory and restart readback. Do not infer physical duration from the compressed logical simulation.
+4. Before a future physical 65-minute conversation, repeat a **new independent two-round short gate** on the same release version and configuration. Then test the long session with facts throughout, late correction/withdrawal, and the same candidate→review→formal→restart checks.
+5. Record native SDK event order, actual audio continuity, interruption/listening return and microphone/speaker acoustics separately from digital silent-audio automation. Keep the historical near-minute delay and 23:04 event open until a matching attempt trace and server stages identify their own first failing point.
+
+If a ticket write result is unknown, do not automatically repeat that POST. Preserve the original trace and request-exposure diagnostics. A missing server access completion log is not proof that the request was never sent. No historical conversation or candidate should be replayed or cleaned as part of this runbook.

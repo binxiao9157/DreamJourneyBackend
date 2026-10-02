@@ -25,6 +25,18 @@ _STAGES = frozenset(
         "candidateCommit",
         "manifestBuild",
         "workerExecution",
+        "themeInput",
+        "themeOrganizationRequest",
+        "themeOrganizationDecode",
+        "themeSupportRequest",
+        "themeSupportDecode",
+        "themeValidate",
+        "themeSafetyRequest",
+        "themeSafetyDecode",
+        "themeRelationRequest",
+        "themeRelationDecode",
+        "themeRelationSupportRequest",
+        "themeRelationSupportDecode",
     }
 )
 
@@ -40,6 +52,7 @@ class LiveMemoryContractFailure(ValueError):
     provider_status: int | None = None
     transport_retryable: bool = False
     retry_after_seconds: int | None = None
+    provider_observation: dict | None = None
 
     def __post_init__(self) -> None:
         if self.stage not in _STAGES:

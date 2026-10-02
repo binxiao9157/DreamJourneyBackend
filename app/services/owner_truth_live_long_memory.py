@@ -348,6 +348,7 @@ class LiveLongMemoryRepository(Protocol):
         worker_id: str,
         lease_seconds: int,
         maximum_concurrency: int = 2,
+        recovery_enabled: bool = False,
     ) -> LiveLongMemoryUnitLease | None: ...
 
     def reserve_provider_attempt(
@@ -588,6 +589,7 @@ class InMemoryLiveLongMemoryRepository:
                             and datetime.fromisoformat(str(item["leaseExpiresAt"])) <= now
                         )
                     )
+                    and item["kind"] == "atomExtraction"
                     and self._runs[item["runId"]].get("state") not in {
                         "failed", "published", "readyToPublish"
                     }
@@ -691,6 +693,16 @@ class InMemoryLiveLongMemoryRepository:
             policy = self._policy_for_run(run)
             if run.get("sourceId") is not None:
                 _assert_run_deadline(run.get("organizationStartedAt"), run.get("lastProgressAt"), policy, datetime.now(timezone.utc))
+            if unit["kind"] == "relationReviewBatch":
+                if unit["state"] in {"completed", "failed"}:
+                    raise LiveLongMemoryConflict("relation unit is already terminal")
+                prior = [a for a in self._attempts.values() if a["unitId"] == unit["unitId"]]
+                if prior:
+                    latest = max(prior, key=lambda a: a["ordinal"])
+                    deadline = datetime.fromisoformat(latest["reservedAt"]) + timedelta(seconds=policy.request_deadline_seconds)
+                    if not unit.get("failureCode") and datetime.now(timezone.utc) < deadline:
+                        raise LiveLongMemoryConflict("relation provider attempt is still in flight")
+                    values["recovery"] = True
             next_requests = int(run["providerRequestCount"]) + 1
             next_input = int(run["reservedInputTokens"]) + int(values["reserved_input_tokens"])
             next_output = int(run["reservedOutputTokens"]) + int(values["reserved_output_tokens"])
@@ -707,6 +719,8 @@ class InMemoryLiveLongMemoryRepository:
                 if int(unit["extraRequestCount"]) >= policy.maximum_unit_extra_requests:
                     raise LiveLongMemoryBudgetExhausted("Live memory unit retry budget exhausted")
                 unit["extraRequestCount"] += 1
+            if unit["kind"] == "relationReviewBatch":
+                unit["failureCode"] = None
             ordinal = next_requests
             attempt_id = str(uuid5(_ATTEMPT_NAMESPACE, f"{run['runId']}:{ordinal}"))
             reservation = LiveLongMemoryProviderReservation(
@@ -766,7 +780,10 @@ class InMemoryLiveLongMemoryRepository:
                 _assert_run_deadline(run.get("organizationStartedAt"), run.get("lastProgressAt"), policy, now)
             attempts = [item for item in self._attempts.values() if item["unitId"] == plan.unit_id]
             if attempts:
-                _assert_request_deadline(max(attempts, key=lambda item: item["ordinal"])["reservedAt"], policy, now)
+                latest = max(attempts, key=lambda item: item["ordinal"])
+                if values.get("provider_attempt_id") is not None and latest["attemptId"] != values["provider_attempt_id"]:
+                    raise LiveLongMemoryConflict("provider attempt was superseded")
+                _assert_request_deadline(latest["reservedAt"], policy, now)
             lease_owner = values.get("lease_owner")
             lease_generation = values.get("lease_generation")
             if lease_owner is not None or lease_generation is not None:
@@ -812,6 +829,10 @@ class InMemoryLiveLongMemoryRepository:
             unit = self._units.get(plan.unit_id)
             if unit is None or unit["inputHash"] != plan.input_hash:
                 raise LiveLongMemoryConflict("Live memory unit input changed")
+            if values.get("provider_attempt_id") is not None:
+                attempts = [a for a in self._attempts.values() if a["unitId"] == plan.unit_id]
+                if not attempts or max(attempts, key=lambda a: a["ordinal"])["attemptId"] != values["provider_attempt_id"]:
+                    raise LiveLongMemoryConflict("provider attempt was superseded")
             lease_owner = values.get("lease_owner")
             lease_generation = values.get("lease_generation")
             if lease_owner is not None or lease_generation is not None:
@@ -1140,6 +1161,8 @@ class PostgresLiveLongMemoryRepository:
     def claim_planned_unit(self, **values: Any) -> LiveLongMemoryUnitLease | None:
         with self._cursor() as cursor:
             maximum_concurrency = max(1, int(values.get("maximum_concurrency") or 2))
+            cursor.execute("SELECT set_config('dreamjourney.live_recovery_worker', %s, true)",
+                ('v1' if values.get('recovery_enabled') else 'disabled',))
             cursor.execute(
                 """
                 SELECT unit.*
@@ -1150,9 +1173,16 @@ class PostgresLiveLongMemoryRepository:
                     (unit.state = 'planned' AND (unit.lease_expires_at IS NULL OR unit.lease_expires_at <= NOW()))
                     OR (unit.state = 'running' AND unit.lease_expires_at < NOW())
                 )
+                  AND unit.kind='atomExtraction'
+                  AND (%s OR NOT EXISTS (
+                    SELECT 1 FROM owner_truth.live_recovery_sessions r
+                    JOIN owner_truth.interview_sessions i ON i.id=r.session_id
+                    WHERE r.vault_id=run_row.vault_id AND r.owner_subject_id=run_row.owner_subject_id
+                      AND r.authority_epoch=run_row.authority_epoch AND i.product_session_id=run_row.product_session_id
+                  ))
                   AND run_row.state NOT IN ('failed', 'published', 'readyToPublish')
                   AND (
-                    run_row.source_id IS NULL
+                    run_row.organization_started_at IS NULL
                     OR (
                       run_row.organization_started_at IS NOT NULL
                       AND run_row.last_progress_at IS NOT NULL
@@ -1176,7 +1206,7 @@ class PostgresLiveLongMemoryRepository:
                 FOR UPDATE OF run_row, unit SKIP LOCKED
                 LIMIT 1
                 """,
-                (maximum_concurrency,),
+                (bool(values.get('recovery_enabled')),maximum_concurrency),
             )
             unit = cursor.fetchone()
             if unit is None:
@@ -1278,7 +1308,7 @@ class PostgresLiveLongMemoryRepository:
         with self._cursor() as cursor:
             run = self._run_row(cursor, str(values["run_id"]), lock=True)
             policy = self._policy_for_run(run)
-            if run["source_id"] is not None:
+            if run["organization_started_at"] is not None:
                 _assert_run_deadline(
                     run.get("organization_started_at"), run.get("last_progress_at"),
                     policy, datetime.now(timezone.utc),
@@ -1290,6 +1320,17 @@ class PostgresLiveLongMemoryRepository:
             unit = cursor.fetchone()
             if unit is None or str(unit["run_id"]) != str(run["id"]):
                 raise LiveLongMemoryConflict("provider attempt unit is unavailable")
+            if str(unit["kind"]) == "relationReviewBatch":
+                if str(unit["state"]) in {"completed", "failed"}:
+                    raise LiveLongMemoryConflict("relation unit is already terminal")
+                cursor.execute("SELECT created_at FROM owner_truth.live_memory_provider_attempts WHERE unit_id = %s ORDER BY ordinal DESC LIMIT 1", (unit["id"],))
+                latest = cursor.fetchone()
+                if latest is not None:
+                    deadline = latest["created_at"] + timedelta(seconds=policy.request_deadline_seconds)
+                    if not unit.get("failure_code") and datetime.now(timezone.utc) < deadline:
+                        raise LiveLongMemoryConflict("relation provider attempt is still in flight")
+                    values["recovery"] = True
+                cursor.execute("UPDATE owner_truth.live_memory_work_units SET failure_code = NULL WHERE id = %s", (unit["id"],))
             next_requests = int(run["provider_request_count"]) + 1
             next_input = int(run["reserved_input_tokens"]) + int(values["reserved_input_tokens"])
             next_output = int(run["reserved_output_tokens"]) + int(values["reserved_output_tokens"])
@@ -1369,7 +1410,7 @@ class PostgresLiveLongMemoryRepository:
             run = self._run_row(cursor, plan.run_id, lock=True)
             policy = self._policy_for_run(run)
             now = datetime.now(timezone.utc)
-            if run["source_id"] is not None:
+            if run["organization_started_at"] is not None:
                 _assert_run_deadline(
                     run.get("organization_started_at"), run.get("last_progress_at"), policy, now,
                 )
@@ -1381,11 +1422,13 @@ class PostgresLiveLongMemoryRepository:
             if unit is None or str(unit["input_hash"]) != plan.input_hash:
                 raise LiveLongMemoryConflict("Live memory unit input changed")
             cursor.execute(
-                "SELECT created_at FROM owner_truth.live_memory_provider_attempts WHERE unit_id = %s ORDER BY ordinal DESC LIMIT 1",
+                "SELECT id, created_at FROM owner_truth.live_memory_provider_attempts WHERE unit_id = %s ORDER BY ordinal DESC LIMIT 1",
                 (plan.unit_id,),
             )
             latest_attempt = cursor.fetchone()
             if latest_attempt is not None:
+                if values.get("provider_attempt_id") is not None and str(latest_attempt["id"]) != values["provider_attempt_id"]:
+                    raise LiveLongMemoryConflict("provider attempt was superseded")
                 _assert_request_deadline(latest_attempt["created_at"], policy, now)
             lease_owner = values.get("lease_owner")
             lease_generation = values.get("lease_generation")
@@ -1432,7 +1475,7 @@ class PostgresLiveLongMemoryRepository:
                 "UPDATE owner_truth.live_memory_work_units SET state = 'completed', output_hash = %s, output_coverage = %s, updated_at = NOW() WHERE id = %s",
                 (output_hash, self._json(coverage), plan.unit_id),
             )
-            if run["source_id"] is not None:
+            if run["organization_started_at"] is not None:
                 cursor.execute(
                     "UPDATE owner_truth.live_memory_runs SET last_progress_at = NOW() WHERE id = %s",
                     (plan.run_id,),
@@ -1448,6 +1491,11 @@ class PostgresLiveLongMemoryRepository:
             unit = cursor.fetchone()
             if unit is None or str(unit["input_hash"]) != plan.input_hash:
                 raise LiveLongMemoryConflict("Live memory unit input changed")
+            if values.get("provider_attempt_id") is not None:
+                cursor.execute("SELECT id FROM owner_truth.live_memory_provider_attempts WHERE unit_id = %s ORDER BY ordinal DESC LIMIT 1", (plan.unit_id,))
+                latest = cursor.fetchone()
+                if latest is None or str(latest["id"]) != values["provider_attempt_id"]:
+                    raise LiveLongMemoryConflict("provider attempt was superseded")
             lease_owner = values.get("lease_owner")
             lease_generation = values.get("lease_generation")
             if lease_owner is not None or lease_generation is not None:
@@ -1475,7 +1523,18 @@ class PostgresLiveLongMemoryRepository:
                     plan.unit_id,
                 ),
             )
-            if terminal:
+            partial_lane = False
+            if terminal and plan.kind in {'atomExtraction','themeOrganization','themeSupport','themeSafety','themeRelation','themeRelationSupport','privateThemeDraft','private:themeOrganization','private:themeSupport'}:
+                cursor.execute("""SELECT 1 FROM owner_truth.live_memory_runs r
+                    JOIN owner_truth.interview_sessions i ON i.product_session_id=r.product_session_id
+                        AND i.vault_id=r.vault_id AND i.owner_subject_id=r.owner_subject_id
+                    JOIN owner_truth.live_recovery_sessions s ON s.session_id=i.id
+                    WHERE r.id=%s AND s.authority_epoch=r.authority_epoch
+                        AND (s.coordinates->>'generation')::integer=r.capture_generation""",(plan.run_id,))
+                partial_lane = cursor.fetchone() is not None
+            # Only explicitly negotiated sessions permit failed units to be
+            # isolated by the theme/correction validator. Legacy failure stays global.
+            if terminal and not partial_lane:
                 cursor.execute(
                     "UPDATE owner_truth.live_memory_runs SET state = 'failed', failure_code = %s, updated_at = NOW() WHERE id = %s",
                     (failure_code, plan.run_id),
