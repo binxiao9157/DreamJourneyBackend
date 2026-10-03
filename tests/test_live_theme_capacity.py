@@ -46,7 +46,13 @@ class Probe(RecoveryThemeAssembler):
         result=self.provider.request_prepared(stage=stage,request=request).payload
         kw['validator'](result);return result
     def http(self,request):
-        body=json.loads(request.content);data=json.loads(body['messages'][1]['content']);material=data['material']
+        body=json.loads(request.content);data=json.loads(body['messages'][1]['content'])
+        if 'relationScreen' in data:
+            value=dict(schemaVersion='live-relation-screen-v1',inputHash=data['inputHash'],targets=[
+                dict(topicId=t['topicId'],version=t['version'],proposalHash=t['proposalHash'],verdict='possible')
+                for t in data['relationScreen']['targets']])
+            return httpx.Response(200,json=dict(choices=[dict(message=dict(content=json.dumps(value)),finish_reason='stop')]))
+        material=data['material']
         if 'proposal' in data:
             p=data['proposal'];value=dict(schemaVersion='owner-truth-live-theme-relation-support-v1',
                 inputHash=data['inputHash'],proposalHash=data['proposalHash'],verdict='supported',

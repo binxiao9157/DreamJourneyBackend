@@ -33,6 +33,8 @@ _STAGES = frozenset(
         "themeValidate",
         "themeSafetyRequest",
         "themeSafetyDecode",
+        "themeRelationScreenRequest",
+        "themeRelationScreenDecode",
         "themeRelationRequest",
         "themeRelationDecode",
         "themeRelationSupportRequest",

@@ -86,7 +86,8 @@ class RecoveryThemeAssembler:
             model_failure=isinstance(error,LiveMemoryContractFailure) and error.category in {'http','contract','transport'}
             can_retry=model_failure and (error.transport_retryable or error.contract_retry_eligible)
             terminal=model_failure and (len(attempts)>=1 or not can_retry
-                or (stage=='themeRelation' and error.reason=='themeCorrectionKindMismatch'))
+                or (stage=='themeRelation' and error.reason=='themeCorrectionKindMismatch')
+                or (stage=='themeRelationScreen' and error.category=='contract'))
             with self._uow(stage+'Failure',lease):
                 self._admit(lease)
                 repo=self.host._store.owner_truth_live_long_memory_repository()
@@ -246,6 +247,48 @@ class RecoveryThemeAssembler:
             if not denied:safe.append(theme)
         return tuple(safe),tuple(blocked)
 
+    def screen_relation_targets(self, *, lease, source, run_id, theme, atoms, targets):
+        from app.async_effects.owner_truth_live_relation_paging import identity_context
+        from app.services.owner_truth_live_topics import fact_fingerprint
+        # Keep stable catalog order, and retain exact matches regardless of a
+        # model's screening decision. The subsequent evidence checks still apply.
+        material=dict(version='live-relation-screen-v1',current=identity_context(theme.payload()),
+            targets=[dict(topicId=t['topicId'],version=t['version'],proposalHash=t['proposalHash'],
+                state=t['state'],identity=identity_context(t['theme'])) for t in targets])
+        try:
+            payload=self._call(lease=lease,run_id=run_id,revision=source.source_metadata['snapshotRevision'],
+                source_id=source.source_id,atoms=[material],page_key='relation-screen:'+digest(material),
+                prepared=self.provider.prepare_relation_screen(material=material),
+                validator=lambda p:self.provider.validate_relation_screen(material=material,payload=p))
+        except RecoveryThemePageFailed as error:
+            if not optional_relation_failure(error):raise
+            self.defer_relation(theme=theme,atoms=atoms,targets=targets,reason=error.code)
+            return []
+        except LiveLongMemoryBudgetExhausted:
+            self.defer_relation(theme=theme,atoms=atoms,targets=targets,reason='optionalRelationBudgetExhausted')
+            return []
+        except LiveMemoryContractFailure as error:
+            if error.category=='input' and error.reason=='inputOverCapacity':
+                reason='relationScreenOverCapacity'
+            elif error.category=='contract' and error.reason.startswith('relationScreen'):
+                # Reject the entire malformed retrieval answer, not the already
+                # verified current facts. No selected target can escape this path.
+                reason=error.code
+            else:raise
+            self.defer_relation(theme=theme,atoms=atoms,targets=targets,reason=reason)
+            return []
+        verdicts={t['topicId']:t['verdict'] for t in payload['targets']}
+        ids={a['atomId'] for a in atoms};hashes={fact_fingerprint(a['content']) for a in atoms}
+        exact={t['topicId'] for t in targets if any(a['atomId'] in ids or
+            fact_fingerprint(a['content']) in hashes for a in t['atoms'])}
+        selected=[t for t in targets if t['topicId'] in exact or verdicts[t['topicId']]!='unlikely']
+        self.relation_screens.append(dict(themeKey=theme.key,inputHash=digest(material),responseHash=digest(payload),
+            targets=payload['targets'],exactMatchTargetIds=sorted(exact),
+            selectedTargetIds=[t['topicId'] for t in selected],
+            excludedTargetIds=[t['topicId'] for t in targets if t not in selected],
+            semantics='retrievalOnlyNotVerifiedNoRelation'))
+        return selected
+
     def relate_themes(self,*,lease,intent,source,run_id,themes,catalog):
         from dataclasses import replace
         from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
@@ -254,6 +297,7 @@ class RecoveryThemeAssembler:
             actor_subject_id=intent.target.owner_subject_id)
         by_id={a['atomId']:a for a in catalog};accepted=[];relations={};blocked=[];unchanged=[];corrections={}
         self.deferred_relations=[]
+        self.relation_screens=[]
         for theme in themes:
             atoms=[by_id[a] for a in theme.atom_ids]
             with self._uow('RelatedRead',lease):
@@ -261,6 +305,10 @@ class RecoveryThemeAssembler:
                 targets=self.host._store.owner_truth_live_topic_repository().relation_catalog(context=context,
                     atom_ids=theme.atom_ids,fact_hashes=[fact_fingerprint(a['content']) for a in atoms])
             if not targets:accepted.append(theme);continue
+            if len(targets)>1:
+                targets=self.screen_relation_targets(lease=lease,source=source,run_id=run_id,
+                    theme=theme,atoms=atoms,targets=targets)
+                if not targets:accepted.append(theme);continue
             from app.async_effects.owner_truth_live_relation_paging import needs_relation_paging, relate_paged_theme
             if needs_relation_paging(self.provider, theme, atoms, targets):
                 result=relate_paged_theme(self,lease=lease,intent=intent,source=source,run_id=run_id,
@@ -476,7 +524,7 @@ class RecoveryThemeAssembler:
             from dataclasses import replace
             command=replace(command,proposals=tuple(replace(p,correction_of_memory_version_id=corrections.get(str(a['id'])))
                 for a,p in zip(selected,command.proposals)))
-        manifest=dict(deferredRelations=list(getattr(self,'deferred_relations',[])),privateDraftRefs=draft_refs,factResolution=resolution,unchangedRelations=list(unchanged),schemaVersion='live-recovery-publication-v1',snapshotId=metadata['snapshotId'],
+        manifest=dict(relationScreens=list(getattr(self,'relation_screens',[])),deferredRelations=list(getattr(self,'deferred_relations',[])),privateDraftRefs=draft_refs,factResolution=resolution,unchangedRelations=list(unchanged),schemaVersion='live-recovery-publication-v1',snapshotId=metadata['snapshotId'],
             snapshotHash=metadata['snapshotHash'],sourceId=source.source_id,sourceHash=source.source_content_hash,
             receivedRanges=metadata['receivedRanges'],missingRanges=metadata['missingRanges'],
             endPositionKnown=metadata['endPositionKnown'],omittedAtomIds=list(omitted),blockedThemes=list(blocked),

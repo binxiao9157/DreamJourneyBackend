@@ -18,6 +18,11 @@ from threading import RLock
 from typing import Any, Mapping, Protocol, Sequence
 from uuid import UUID, uuid5
 
+# Additional cap for optional historical association, not a larger total budget.
+# Count reservations, including failures and unknown outcomes, under the run lock.
+OPTIONAL_RELATION_STAGES = ('themeRelationScreen', 'themeRelation', 'themeRelationSupport')
+OPTIONAL_RELATION_MAX_REQUESTS = 32
+
 LIVE_LONG_MEMORY_PIPELINE_VERSION = "owner-truth-live-long-memory-v3"
 LIVE_LONG_MEMORY_BUDGET_POLICY_VERSION = "live-long-memory-budget-v1"
 LIVE_LONG_MEMORY_MANIFEST_VERSION = "owner-truth-live-publication-manifest-v2"
@@ -703,6 +708,10 @@ class InMemoryLiveLongMemoryRepository:
                     if not unit.get("failureCode") and datetime.now(timezone.utc) < deadline:
                         raise LiveLongMemoryConflict("relation provider attempt is still in flight")
                     values["recovery"] = True
+            if (values["stage"] in OPTIONAL_RELATION_STAGES and sum(
+                a["runId"] == run["runId"] and a["stage"] in OPTIONAL_RELATION_STAGES
+                for a in self._attempts.values()) >= OPTIONAL_RELATION_MAX_REQUESTS):
+                raise LiveLongMemoryBudgetExhausted("optionalRelationBudgetExhausted")
             next_requests = int(run["providerRequestCount"]) + 1
             next_input = int(run["reservedInputTokens"]) + int(values["reserved_input_tokens"])
             next_output = int(run["reservedOutputTokens"]) + int(values["reserved_output_tokens"])
@@ -1331,6 +1340,11 @@ class PostgresLiveLongMemoryRepository:
                         raise LiveLongMemoryConflict("relation provider attempt is still in flight")
                     values["recovery"] = True
                 cursor.execute("UPDATE owner_truth.live_memory_work_units SET failure_code = NULL WHERE id = %s", (unit["id"],))
+            if values["stage"] in OPTIONAL_RELATION_STAGES:
+                cursor.execute("""SELECT COUNT(*) AS count FROM owner_truth.live_memory_provider_attempts
+                    WHERE run_id=%s AND stage=ANY(%s)""", (run["id"],list(OPTIONAL_RELATION_STAGES)))
+                if int(cursor.fetchone()["count"]) >= OPTIONAL_RELATION_MAX_REQUESTS:
+                    raise LiveLongMemoryBudgetExhausted("optionalRelationBudgetExhausted")
             next_requests = int(run["provider_request_count"]) + 1
             next_input = int(run["reserved_input_tokens"]) + int(values["reserved_input_tokens"])
             next_output = int(run["reserved_output_tokens"]) + int(values["reserved_output_tokens"])
@@ -1524,7 +1538,7 @@ class PostgresLiveLongMemoryRepository:
                 ),
             )
             partial_lane = False
-            if terminal and plan.kind in {'atomExtraction','themeOrganization','themeSupport','themeSafety','themeRelation','themeRelationSupport','privateThemeDraft','private:themeOrganization','private:themeSupport'}:
+            if terminal and plan.kind in {'atomExtraction','themeOrganization','themeSupport','themeSafety','themeRelation','themeRelationSupport','themeRelationScreen','privateThemeDraft','private:themeOrganization','private:themeSupport'}:
                 cursor.execute("""SELECT 1 FROM owner_truth.live_memory_runs r
                     JOIN owner_truth.interview_sessions i ON i.product_session_id=r.product_session_id
                         AND i.vault_id=r.vault_id AND i.owner_subject_id=r.owner_subject_id
