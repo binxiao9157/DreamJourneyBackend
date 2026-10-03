@@ -370,6 +370,7 @@ class Settings:
     realtime_voice_long_live_max_session_seconds: int = 2 * 60 * 60
     realtime_voice_long_live_max_session_bytes: int = 1024 * 1024 * 1024
     realtime_voice_snapshot_max_chars: int = 32_768
+    realtime_voice_system_role_max_bytes: int = 8_192
     volcengine_voice_clone_api_key: Optional[str] = None
     volcengine_voice_clone_train_url: str = "https://openspeech.bytedance.com/api/v3/tts/voice_clone"
     volcengine_voice_clone_query_url: str = "https://openspeech.bytedance.com/api/v3/tts/get_voice"
@@ -1161,6 +1162,10 @@ class Settings:
             realtime_voice_snapshot_max_chars=_env_int(
                 "REALTIME_VOICE_SNAPSHOT_MAX_CHARS",
                 cls.realtime_voice_snapshot_max_chars,
+            ),
+            realtime_voice_system_role_max_bytes=_env_int(
+                "REALTIME_VOICE_SYSTEM_ROLE_MAX_BYTES",
+                cls.realtime_voice_system_role_max_bytes,
             ),
             volcengine_voice_clone_api_key=_env("VOLCENGINE_VOICE_CLONE_API_KEY"),
             volcengine_voice_clone_train_url=_env("VOLCENGINE_VOICE_CLONE_TRAIN_URL", cls.volcengine_voice_clone_train_url) or cls.volcengine_voice_clone_train_url,

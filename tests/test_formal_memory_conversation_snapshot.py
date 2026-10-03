@@ -131,7 +131,7 @@ class FormalMemoryConversationSnapshotTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "formalMemorySnapshotUnavailable")
 
-    def test_all_eligible_facts_are_bound_or_live_fails_closed(self):
+    def test_all_eligible_facts_remain_in_projection_but_live_selects_whole_facts(self):
         projection = _ready_projection()
         projection["entries"].extend(
             {
@@ -150,14 +150,13 @@ class FormalMemoryConversationSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["coverage"]["eligibleFactCount"], 66)
         self.assertEqual(snapshot["coverage"]["includedFactCount"], 66)
         self.assertFalse(snapshot["coverage"]["truncated"])
-        with self.assertRaises(FormalMemoryConversationSnapshotError) as raised:
-            bind_provider_role_text(
-                snapshot,
-                system_role="synthetic role",
-                speaking_style="synthetic style",
-                max_chars=1_024,
-            )
-        self.assertEqual(raised.exception.code, "formalMemorySnapshotTooLarge")
+        bound = bind_provider_role_text(
+            snapshot, system_role="synthetic role", speaking_style="synthetic style", max_chars=1_024,
+        )
+        self.assertLessEqual(len(bound["providerRoleText"]), 1_024)
+        self.assertLess(len(bound["coreFacts"]), 66)
+        self.assertGreater(len(bound["coreFacts"]), 0)
+        self.assertEqual(len(snapshot["coreFacts"]), 66)
 
     def test_provider_role_hash_binds_exact_full_fact_text(self):
         projection = _ready_projection()
@@ -175,15 +174,16 @@ class FormalMemoryConversationSnapshotTests(unittest.TestCase):
         )
 
         snapshot = service.build(context=self.context)
-        with self.assertRaises(FormalMemoryConversationSnapshotError):
-            bind_provider_role_text(
-                snapshot,
-                system_role="synthetic role",
-                speaking_style="synthetic style",
-                max_chars=4_096,
-            )
+        bound = bind_provider_role_text(
+            snapshot, system_role="synthetic role", speaking_style="synthetic style", max_chars=4_096,
+        )
+        self.assertLessEqual(len(bound["providerRoleText"]), 4_096)
+        self.assertLessEqual(bound["providerRoleByteCount"], 8_192)
+        self.assertEqual(len(snapshot["coreFacts"]), 514)
+        self.assertEqual(bound["providerContextHash"], "sha256:" + hashlib.sha256(
+            bound["providerRoleText"].encode("utf-8")).hexdigest())
 
-    def test_provider_role_keeps_all_65_cross_dimension_facts_and_qualifiers(self):
+    def test_provider_role_budgets_65_facts_and_preserves_selected_qualifiers(self):
         critical = [
             ("identity", "本科在晨光大学计算机专业就读，2016年毕业。"),
             ("knowledge", "硕士在海岚大学学习信息系统管理，2019年毕业。"),
@@ -252,10 +252,26 @@ class FormalMemoryConversationSnapshotTests(unittest.TestCase):
             bound["providerRoleByteCount"],
             len(bound["providerRoleText"].encode("utf-8")),
         )
-        for _, statement in critical:
-            self.assertIn(statement, bound["providerRoleText"])
         rows = self._provider_rows(bound["providerRoleText"])
-        self.assertEqual(len(rows), 65)
+        self.assertEqual(len(rows), len(bound["coreFacts"]))
+        self.assertLess(len(rows), 65)
+        self.assertEqual({row["dimension"] for row in rows}, {d for d, _ in critical})
+        originals = {f["statement"]: f for f in snapshot["coreFacts"]}
+        for row in rows:
+            expected = dict(zip(snapshot_module._PROVIDER_FACT_FIELDS,
+                                snapshot_module._provider_fact_values(originals[row["statement"]])))
+            expected["ref"] = row["ref"]  # IDs are renumbered in the bounded view.
+            self.assertEqual(row, expected)
+        # With all five critical facts fitting, retain every qualifier exactly.
+        critical_snapshot = dict(snapshot)
+        critical_statements = {s for _, s in critical}
+        critical_snapshot["coreFacts"] = [f for f in snapshot["coreFacts"]
+                                          if f["statement"] in critical_statements]
+        critical_snapshot["coverage"] = {"eligibleFactCount": 5}
+        critical_bound = bind_provider_role_text(
+            critical_snapshot, system_role="只能依据正式记忆回答。", speaking_style="自然回答。")
+        rows = self._provider_rows(critical_bound["providerRoleText"])
+        self.assertEqual({r["statement"] for r in rows}, critical_statements)
         self.assertTrue(any(row["polarity"] == "negative" for row in rows))
         self.assertTrue(
             any(row["validTimeExpression"] == "过去与当前必须区分" for row in rows)

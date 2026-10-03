@@ -17674,6 +17674,7 @@ def _build_authorized_realtime_live_session(
             system_role=_REALTIME_LIVE_SYSTEM_ROLE,
             speaking_style=_REALTIME_LIVE_SPEAKING_STYLE,
             max_chars=settings.realtime_voice_snapshot_max_chars,
+            max_bytes=settings.realtime_voice_system_role_max_bytes,
         )
     except FormalMemoryConversationSnapshotError as exc:
         status_code = 503 if exc.code in {
@@ -17703,7 +17704,8 @@ def _build_authorized_realtime_live_session(
     )
     logger.info(
         "liveSnapshotIssued contractVersion=%s factCount=%s snapshotChars=%s "
-        "snapshotBytes=%s checkpointHash=%s contextHash=%s",
+        "snapshotBytes=%s checkpointHash=%s contextHash=%s "
+        "providerRoleBytes=%s providerRoleMaxBytes=%s eligibleFacts=%s omittedFacts=%s",
         7,
         len(snapshot.get("coreFacts") or []),
         len(snapshot_json),
@@ -17714,6 +17716,10 @@ def _build_authorized_realtime_live_session(
         "sha256:" + hashlib.sha256(
             str(snapshot.get("contextHash") or "").encode("utf-8")
         ).hexdigest()[:16],
+        snapshot["providerRoleByteCount"],
+        snapshot["providerRoleBudget"]["maxBytes"],
+        snapshot["coverage"]["eligibleFactCount"],
+        snapshot["coverage"]["omittedFactCount"],
     )
 
     client_session_id = str(payload.get("clientSessionId") or "").strip()
