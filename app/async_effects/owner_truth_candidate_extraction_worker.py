@@ -2802,14 +2802,12 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                             )
                         )
 
-            intra_results = self._relation_batch_page(
+            intra_results = self._relation_intra_batch_pages(
                 turns=turns,
-                incoming=incoming_page,
-                existing=incoming_page,
+                memories=incoming_page,
                 run_identity=run_identity,
                 retry_context=retry_context,
                 ordinal=2_000_000 + batch_start * 10_000 + 9_000,
-                intra_batch=True,
             )
             for result in intra_results:
                 incoming_index = int(result["incomingIndex"])
@@ -2848,6 +2846,38 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
             resolved = [memory for memory in resolved if memory is not None]
             resolved.extend(memory for memory in local_results if memory is not None)
         return resolved, retracted_atom_ids, relations_changed
+
+    def _relation_intra_batch_pages(
+        self,
+        *,
+        turns: list[dict[str, Any]],
+        memories: list[dict[str, Any]],
+        run_identity: LiveLongMemoryRunIdentity,
+        retry_context: LiveMemoryContractRetryContext | None,
+        ordinal: int,
+    ) -> list[dict[str, Any]]:
+        """Only earlier facts are eligible targets, including on small pages.
+
+        Excluding self/future identities in the request avoids relying on a
+        model to ignore an identical copy. Each prefix retains an ordinary
+        durable unit, strict validation/cache checks and the shared run budget.
+        """
+        results = []
+        for incoming_index, memory in enumerate(memories):
+            if incoming_index == 0:
+                results.append({"incomingIndex": 0,
+                                "scannedExistingCount": len(memories), "decisions": []})
+                continue
+            prior = self._relation_batch_page(
+                turns=turns, incoming=[memory], existing=memories[:incoming_index],
+                run_identity=run_identity, retry_context=retry_context,
+                ordinal=ordinal + incoming_index, intra_batch=False,
+            )[0]
+            # Rebind page-local coordinates only after strict validation. The
+            # provider and persisted unit retain the actual prefix page count.
+            results.append({**prior, "incomingIndex": incoming_index,
+                            "scannedExistingCount": len(memories)})
+        return results
 
     def _relation_batch_page(
         self,
@@ -2901,30 +2931,12 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
             fits = len(json.dumps(measured_request, ensure_ascii=False).encode("utf-8")) <= 55_000
         if not fits:
             if len(incoming) > 1 and intra_batch:
-                results = []
-                for incoming_index in range(len(incoming)):
-                    if incoming_index == 0:
-                        results.append({
-                            "incomingIndex": 0,
-                            "scannedExistingCount": len(existing),
-                            "decisions": [],
-                        })
-                        continue
-                    prior = self._relation_batch_page(
-                        turns=turns,
-                        incoming=[incoming[incoming_index]],
-                        existing=existing[:incoming_index],
-                        run_identity=run_identity,
-                        retry_context=retry_context,
-                        ordinal=ordinal + incoming_index,
-                        intra_batch=False,
-                    )[0]
-                    results.append({
-                        **prior,
-                        "incomingIndex": incoming_index,
-                        "scannedExistingCount": len(existing),
-                    })
-                return results
+                if incoming != existing:
+                    raise contract_failure("relationInput", "intraBatchIdentityMismatch", category="input")
+                return self._relation_intra_batch_pages(
+                    turns=turns, memories=incoming, run_identity=run_identity,
+                    retry_context=retry_context, ordinal=ordinal,
+                )
             if len(existing) > 1:
                 midpoint = len(existing) // 2
                 sections = (existing[:midpoint], existing[midpoint:])

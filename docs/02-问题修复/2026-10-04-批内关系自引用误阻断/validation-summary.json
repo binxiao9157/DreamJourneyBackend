@@ -1,0 +1,59 @@
+{
+  "release": "live-causal-relation-20261004",
+  "status": "DEVICE_SHORT_PASS / DEVICE_10M_PASS / DEPLOY_PASS",
+  "scope": "This release and these two synthetic real-device scenes only",
+  "localRegression": {
+    "passed": 141,
+    "failed": 0,
+    "isolatedPostgresPassed": 13,
+    "providerContractCalls": 4
+  },
+  "retainedFindings": [
+    "one privateThemeDraft failed with noReliableThemes; final publication succeeded",
+    "optional historical relation budget exhausted; current themes published without historical mutation",
+    "run state still organizing at observed snapshot despite published snapshot; not sufficient to infer repeated work"
+  ],
+  "acousticMicrophoneSpeakerLoop": "NOT_RUN",
+  "scenes": {
+    "short": {
+      "status": "PASS",
+      "completedTurns": 2,
+      "liveWallSeconds": 57.320321083418094,
+      "themeCount": 1,
+      "candidateCount": 3,
+      "formalMemoryCount": 3,
+      "formalColdReadbackStatus": "PASS",
+      "pageStatus": "整理完成，已存入待确认记忆",
+      "coldSamplePageStatus": "整理完成，已存入待确认记忆",
+      "observedCloseToCompletedPageSeconds": 20.354233583319,
+      "maximumInputFrameGapSeconds": 0.032408458297140896,
+      "allBodyMessagesServerConfirmed": true
+    },
+    "tenMinute": {
+      "status": "PASS",
+      "completedTurns": 22,
+      "liveWallSeconds": 614.8340354165994,
+      "themeCount": 3,
+      "candidateCount": 12,
+      "formalMemoryCount": 12,
+      "formalColdReadbackStatus": "PASS",
+      "pageStatus": "整理完成，已存入待确认记忆",
+      "coldSamplePageStatus": "整理完成，已存入待确认记忆",
+      "observedCloseToCompletedPageSeconds": 83.1805731250206,
+      "maximumInputFrameGapSeconds": 0.09093087504152209,
+      "allBodyMessagesServerConfirmed": true
+    }
+  },
+  "longPublication": {
+    "themeCount": 3,
+    "atomCount": 12,
+    "completeness": "receivedComplete",
+    "omittedAtomCount": 0,
+    "publishedSetEqualsAllAtoms": true,
+    "deferredRelationReasons": [
+      "optionalRelationBudgetExhausted",
+      "optionalRelationBudgetExhausted",
+      "optionalRelationBudgetExhausted"
+    ]
+  }
+}

@@ -1457,7 +1457,9 @@ class OwnerTruthLiveLongMemoryPipelineRedTests(unittest.TestCase):
         self.assertEqual(len(command.proposals), 300)
         self.assertLessEqual(provider.maximum_incoming_page, 8)
         self.assertLessEqual(provider.maximum_existing_page, 32)
-        self.assertEqual(provider.batch_relation_requests, 228)
+        # 190 cross-page requests + 262 causal prefix requests (37*7 + 3).
+        # Every earlier fact pair is still checked below; no budget is raised.
+        self.assertEqual(provider.batch_relation_requests, 452)
         expected_claims = [str(turn["text"]) for turn in turns]
         expected_pairs = {
             (incoming, existing)
@@ -1465,7 +1467,7 @@ class OwnerTruthLiveLongMemoryPipelineRedTests(unittest.TestCase):
             for existing in expected_claims[:incoming_index]
         }
         self.assertEqual(provider.scanned_pairs, expected_pairs)
-        self.assertEqual(snapshot["providerRequestCount"], 304)
+        self.assertEqual(snapshot["providerRequestCount"], 528)
         self.assertLessEqual(snapshot["plannedUnitCount"], 2_048)
         self.assertLessEqual(snapshot["reservedInputTokens"], 32_000_000)
         self.assertLessEqual(snapshot["reservedOutputTokens"], 8_000_000)
@@ -1945,13 +1947,21 @@ class OwnerTruthLiveLongMemoryPipelineRedTests(unittest.TestCase):
                 if responsibility:
                     result["responsibilityAtomIds"] = responsibility
                     result["omittedOwnedAtomIds"] = []
-            elif "新事实页：" in prompt:
-                incoming = _json_after(prompt, "新事实页：")
-                existing = _json_after(prompt, "既有事实页：")
+            elif "新事实页：" in prompt or "批内唯一事实表：" in prompt:
+                intra = "批内唯一事实表：" in prompt
+                if intra:
+                    table = _json_after(prompt, "批内唯一事实表：")
+                    incoming = [row["memory"] for row in table]
+                    existing = incoming
+                else:
+                    incoming = _json_after(prompt, "新事实页：")
+                    existing = _json_after(prompt, "既有事实页：")
                 results = []
                 for incoming_index, memory in enumerate(incoming):
                     decisions = []
                     for existing_index, prior in enumerate(existing):
+                        if intra and existing_index not in table[incoming_index]["allowedExistingIndices"]:
+                            continue
                         if (
                             memory.get("claim") == "我在杭州的图书馆工作。"
                             and prior.get("claim") == "我在杭州工作。"

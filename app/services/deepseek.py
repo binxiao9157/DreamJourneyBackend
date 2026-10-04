@@ -1602,18 +1602,28 @@ class DeepSeekLiveMemoryOrganizationProxy:
             cls._relation_prompt_evidence(turns),
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         )
-        incoming_json = json.dumps(incoming, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        existing_json = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        intra_rule = (
-            "这是批内检查：incomingIndex 只能指向 existingIndex 小于自身的事实；"
-            "自身及更晚事实不得返回。"
-            if intra_batch
-            else "这是跨批检查。"
-        )
+        if intra_batch:
+            if incoming != existing:
+                raise contract_failure("relationInput", "intraBatchIdentityMismatch", category="input")
+            # One identity table, not identical "new" and "old" fact copies.
+            facts = json.dumps([
+                {"incomingIndex": i, "allowedExistingIndices": list(range(i)), "memory": memory}
+                for i, memory in enumerate(incoming)
+            ], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            material = f"批内唯一事实表：{facts}"
+            intra_rule = (
+                "这是批内检查：existingIndex引用同一事实表的索引。"
+                "每行只能比较allowedExistingIndices中的先前事实；自身及未来事实不是比较目标。"
+                "incomingIndex=0的decisions必须为空。不得把事实与它自己的文本重复当成关系。"
+            )
+        else:
+            incoming_json = json.dumps(incoming, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            existing_json = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            material = f"新事实页：{incoming_json}\n既有事实页：{existing_json}"
+            intra_rule = "这是跨批检查。"
         return f"""分页核对最多八个新原子事实与一个既有事实页的关系。
 用户证据：{evidence}
-新事实页：{incoming_json}
-既有事实页：{existing_json}
+{material}
 {intra_rule}
 
 只输出：{{"results":[{{"incomingIndex":0,"scannedExistingCount":{len(existing)},"decisions":[]}}]}}。

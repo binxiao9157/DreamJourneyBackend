@@ -1,0 +1,9 @@
+{
+  "baseCommit": "6f100acbb811447e40fd30cb27d074bac4ee83e3",
+  "files": {
+    "app/async_effects/owner_truth_candidate_extraction_worker.py": "29e25207722c61a517753bd40b6e726b6a3b20f72a06ea46425279d121238542",
+    "app/services/deepseek.py": "a1d337ca726fb046a279ec76d02e2af832018781c1edf760fec8b056dc0784ce",
+    "tests/test_live_relation_causal_pages.py": "1faeba889da34b0db17bc5ded479ed94c8615d9f2b2f3f735d1a8e65aaa4a308",
+    "tests/test_owner_truth_live_long_memory_pipeline.py": "4f93855d9f83b1aa247df046c85b812a6b23ae9e0e01dbd47a6304a09927da3d"
+  }
+}
