@@ -418,6 +418,72 @@ class PostgresLiveRecoveryRepository:
                 WHERE id=%s AND (source_id IS NULL OR source_id=%s)""",(source_id,snapshot_id,source_id))
             if cur.rowcount!=1: raise LiveRecoveryConflict('immutableSnapshotSource')
 
+    def publish_snapshot(self, *, snapshot_id, source_id, manifest, context, authority_epoch):
+        """Commit a recovery result and settle only the latest quiescent run.
+
+        Uses the caller's candidate/job transaction. Recovery coordinates are
+        locked before snapshot/run, matching append and scan. A published run
+        means the current revision is settled, not that late repair is banned.
+        """
+        from psycopg.types.json import Jsonb
+        self._assert_owner(context)
+        with self._cursor() as cur:
+            cur.execute('SELECT session_id FROM owner_truth.live_recovery_snapshots WHERE id=%s', (snapshot_id,))
+            target = cur.fetchone()
+            if target is None:
+                raise LiveRecoveryConflict('snapshotUnavailable')
+            session_id = str(target['session_id'])
+            record = self._read(cur, session_id, context, authority_epoch)
+            cur.execute('SELECT * FROM owner_truth.live_recovery_snapshots WHERE id=%s FOR UPDATE', (snapshot_id,))
+            snapshot = cur.fetchone()
+            bound_source = str(snapshot['source_id']) if snapshot['source_id'] is not None else None
+            if bound_source != source_id:
+                raise LiveRecoveryConflict('snapshotSourceMismatch')
+            if source_id is None:
+                # This path is reserved for a frozen empty/assistant-only snapshot.
+                if manifest is not None or any(m['role']=='owner' for m in snapshot['snapshot']['messages'].values()):
+                    raise LiveRecoveryConflict('emptySnapshotHasOwnerText')
+                state, failure_code = 'noChange', 'noOwnerText'
+            else:
+                from app.domain.owner_truth.live_topics import digest
+                if (not isinstance(manifest, dict) or manifest.get('snapshotId') != str(snapshot_id)
+                    or manifest.get('sourceId') != source_id
+                    or manifest.get('snapshotHash') != snapshot['snapshot_hash']
+                    or manifest.get('hash') != digest({k:v for k,v in manifest.items() if k!='hash'})):
+                    raise LiveRecoveryConflict('snapshotPublicationBindingMismatch')
+                state, failure_code = ('published' if manifest['themes'] else 'noChange'), None
+            if snapshot['state'] != 'pending':
+                if snapshot['state'] != state or snapshot['publication_manifest'] != manifest:
+                    raise LiveRecoveryConflict('immutableSnapshotPublication')
+            else:
+                cur.execute("""UPDATE owner_truth.live_recovery_snapshots
+                    SET state=%s,publication_manifest=%s,failure_code=%s WHERE id=%s""",
+                    (state, Jsonb(manifest) if manifest is not None else None, failure_code, snapshot_id))
+            # A newer revision or received-but-unfrozen body still owns work.
+            # Partial publication may settle too; a genuine late receipt reopens
+            # the same run without resetting its absolute budget or evidence.
+            if record['state'] != 'frozen' or record['pendingSnapshot']:
+                return
+            cur.execute('SELECT id FROM owner_truth.live_recovery_snapshots WHERE session_id=%s ORDER BY revision DESC LIMIT 1', (session_id,))
+            if str(cur.fetchone()['id']) != str(snapshot_id):
+                return
+            cur.execute("""SELECT run.id,run.state FROM owner_truth.live_memory_runs run
+                JOIN owner_truth.interview_sessions i ON i.product_session_id=run.product_session_id
+                WHERE i.id=%s AND run.vault_id=%s AND run.owner_subject_id=%s
+                  AND run.authority_epoch=%s AND run.capture_generation=%s
+                  AND run.source_id IS NULL FOR UPDATE OF run""",
+                (session_id,context.vault_id,context.owner_subject_id,authority_epoch,record['generation']))
+            run = cur.fetchone()
+            if run is None:
+                raise LiveRecoveryConflict('recoveryRunUnavailable')
+            if run['state'] not in {'collecting','organizing','published'}:
+                return  # Do not resurrect a failed/cancelled or legacy-ready run.
+            cur.execute("""SELECT 1 FROM owner_truth.live_memory_work_units
+                WHERE run_id=%s AND kind='atomExtraction' AND state IN ('planned','running') LIMIT 1""", (run['id'],))
+            if cur.fetchone() is not None:
+                return
+            cur.execute("UPDATE owner_truth.live_memory_runs SET state='published',updated_at=NOW() WHERE id=%s", (run['id'],))
+
     def _persist(self, cur, record, now):
         from psycopg.types.json import Jsonb
         refs = []
@@ -433,6 +499,18 @@ class PostgresLiveRecoveryRepository:
                     raise LiveRecoveryConflict('immutableSnapshotConflict')
             refs.append({key:snap[key] for key in ('snapshotId','revision','hash')})
         record = {**record, 'snapshots':refs}
+        if record['pendingSnapshot']:
+            # Only a new accepted body or final-position update can set this
+            # flag. Replayed receipts and reads cannot resurrect settled work.
+            cur.execute("""UPDATE owner_truth.live_memory_runs run
+                SET state='organizing',updated_at=%s
+                FROM owner_truth.interview_sessions i
+                WHERE i.id=%s AND run.product_session_id=i.product_session_id
+                  AND run.vault_id=%s AND run.owner_subject_id=%s
+                  AND run.authority_epoch=%s AND run.capture_generation=%s
+                  AND run.source_id IS NULL AND run.state='published'""",
+                (now,record['sessionId'],record['vaultId'],record['ownerId'],
+                 record['authorityEpoch'],record['generation']))
         next_scan = _date(record['draftDeadline'])
         # A complete close or newly repaired frozen snapshot is ready now.
         # draftDeadline belongs to open-scene batching, not end-of-scene latency.
@@ -481,9 +559,10 @@ class PostgresLiveRecoveryRepository:
                 try:
                     with self.connection.transaction():
                         run = ledger.begin_or_load(identity, LiveLongMemoryBudgetPolicy())
-                        if run.get('state') in {'failed', 'cancelled', 'published', 'readyToPublish'}:
+                        if run.get('state') in {'failed', 'cancelled', 'readyToPublish'}:
                             raise LiveLongMemoryError('plannerRunTerminal')
-                        unit = ledger.finalize_open_unit(run_id=identity.run_id, policy=LiveLongMemoryBudgetPolicy())
+                        if run.get('state') != 'published':
+                            unit = ledger.finalize_open_unit(run_id=identity.run_id, policy=LiveLongMemoryBudgetPolicy())
                 except LiveLongMemoryError as error:
                     # Persist only a stable type, never exception text or transcript.
                     updated.setdefault('firstPlannerFailure', {
@@ -543,8 +622,8 @@ class LiveRecoverySnapshotScheduler:
                     if str(error) != 'snapshotHasNoOwnerText':raise
                     # Empty/assistant-only input is explicit noChange, not an
                     # invented successful end or a candidate extraction failure.
-                    cur.execute("""UPDATE owner_truth.live_recovery_snapshots SET state='noChange',failure_code='noOwnerText'
-                        WHERE id=%s""",(snapshot_id,))
+                    repo.publish_snapshot(snapshot_id=snapshot_id,source_id=None,manifest=None,
+                        context=context,authority_epoch=row['authority_epoch'])
                     return {'status':'noChange','reason':'noOwnerText'}
                 record=command.write_record(context=context)
                 source=self.store.create_owner_truth_source(record)

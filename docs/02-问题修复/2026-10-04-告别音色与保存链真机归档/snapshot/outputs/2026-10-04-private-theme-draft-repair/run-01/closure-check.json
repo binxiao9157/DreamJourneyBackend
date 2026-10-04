@@ -1,0 +1,10 @@
+{
+  "local": "PASS",
+  "provider": "REGROUP_PASS",
+  "device": "NOT_RUN",
+  "deployment": "NOT_RUN",
+  "linksValid": true,
+  "fingerprintsUnchanged": true,
+  "localPostgres": "STOPPED",
+  "toolDiskImage": "DETACHED"
+}

@@ -176,7 +176,15 @@ def validate_theme_review(*, atoms: Sequence[Mapping[str,Any]], proposal: Mappin
             and assessment.get('compatibleTime') is True and assessment.get('correctionsResolved') is True
             and all(by_id[aid]['supportState']=='supported' for aid in members))
         if not reliable:
-            blocked.append(dict(key=key,atomIds=list(members),reason='themeSupportUnresolved'))
+            entry=dict(key=key,atomIds=list(members),reason='themeSupportUnresolved')
+            # This is a regrouping hint, never permission to publish. A false
+            # grouping verdict must not be retried with the same complete set.
+            if (len(members)>1 and assessment['verdict']=='supported'
+                and assessment.get('correctionsResolved') is True
+                and (assessment.get('sameSubjectEvent') is False or assessment.get('compatibleTime') is False)
+                and all(by_id[aid]['supportState']=='supported' for aid in members)):
+                entry['groupingRejected']=True
+            blocked.append(entry)
             continue
         accepted.append(SupportedLiveTheme(key,title.strip(),summary.strip(),members,evidence,dims,digest(assessment)))
     if set(reviews)!=group_keys:raise LiveThemeConflict('themeReviewIncomplete')

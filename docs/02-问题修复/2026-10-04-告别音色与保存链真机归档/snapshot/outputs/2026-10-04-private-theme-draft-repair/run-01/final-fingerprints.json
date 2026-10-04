@@ -1,0 +1,14 @@
+{
+  "backendHead": "cf60ca7e5748f14954eeae52e5d978576e6e9048",
+  "iosHead": "0bac73d7195b15aee7e1265b56f0eb9d725cde93",
+  "iosWorktreeStatus": "",
+  "sha256": {
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/domain/owner_truth/live_topics.py": "77823960981efea1392b93e1ba3e3e03c4e06ed81eac3619ac8900d72beed4db",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/async_effects/owner_truth_live_recovery_worker.py": "8965a8c807f092cc9faad86990e89b94a9cb78c385410e9e323873fc9ecb5998",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_live_theme_regroup_boundaries.py": "a5cb5f16f531023dc5a09444e149de90d1070acf71386fd12e368d6d5727dca3",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/async_effects/owner_truth_candidate_extraction_worker.py": "62640a1f43a409520fc2b3d0fc1022408bc386179ba103c076415bc64b67391d",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/services/owner_truth_live_recovery.py": "a706891d5572051f55fb7ed4c15bb33008e3e797cd6c767e28f63bdf50e24b90",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-private-theme-draft-repair/run-01/pg-grouping.py": "57e97e3e15175b8496a328f0e25b96bf78a752d262efc697a32c4f1f916862b1",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-private-theme-draft-repair/run-01/provider-probe.py": "ca44d4afa36012c6d8fdb8abb9fddc9064d01e2d24a6596591ec063f02fa3b89"
+  }
+}

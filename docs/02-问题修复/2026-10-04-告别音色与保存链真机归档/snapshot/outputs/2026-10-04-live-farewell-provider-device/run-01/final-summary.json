@@ -1,0 +1,30 @@
+{
+  "status": "PARTIAL_NOT_FULL_DEVICE_PASS",
+  "installed": true,
+  "short": "PASS",
+  "natural10": {
+    "durationSeconds": 641.5796136667486,
+    "ownerTurns": 24,
+    "bodyCount": 48,
+    "naturalClose": "PASS",
+    "labStopRequests": 0,
+    "themeCount": 1,
+    "extractedFacts": 25,
+    "publishedExtractedFactSetExact": true,
+    "formalConfirmation": "NOT_RUN",
+    "originalToolStatus": "FAIL",
+    "originalToolFailure": "themeWouldChangeExistingMemory",
+    "pageStatus": "整理完成，已存入待确认记忆\n少量内容暂未整理完成"
+  },
+  "farewell": {
+    "installedImplementation": "current_Volcengine_Live_SayHello_no_iOS_speech_fallback",
+    "inputPausedToCompletionSeconds": 10.408211958128959,
+    "sameVoiceHumanListening": "NOT_OBSERVED",
+    "completePlaybackEventProof": "INCOMPLETE",
+    "diagnosticExportStatus": "FAIL",
+    "userFeedback": "User will independently test voice timbre later; manual acceptance pending"
+  },
+  "serverPublishedStable": true,
+  "backendDeployment": "NOT_NEEDED_NOT_RUN",
+  "push": "NOT_RUN"
+}

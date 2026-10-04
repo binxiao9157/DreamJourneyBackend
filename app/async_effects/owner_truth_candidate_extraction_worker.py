@@ -3784,7 +3784,6 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
 
             if assembly is not None:
                 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
-                from psycopg.types.json import Jsonb
                 from app.domain.owner_truth.live_topics import digest
                 context = OwnerTruthCommandContext(vault_id=intent.target.vault_id,
                     owner_subject_id=intent.target.owner_subject_id,actor_subject_id=intent.target.owner_subject_id)
@@ -3812,11 +3811,9 @@ class OwnerTruthCandidateExtractionWorkerRuntime:
                 manifest={**assembly.manifest,"themeCount":len(cards),"unchangedThemes":unchanged,"themes":[dict(topicId=c['topicId'],version=c['version'],
                     proposalHash=c['proposalHash']) for c in cards]}
                 manifest.pop("hash",None);manifest['hash']=digest(manifest)
-                with topic_repo._cursor() as cur:
-                    cur.execute("""UPDATE owner_truth.live_recovery_snapshots
-                        SET state=%s,publication_manifest=%s WHERE id=%s AND source_id=%s""",
-                        ('published' if cards else 'noChange',Jsonb(manifest),source.source_metadata['snapshotId'],source.source_id))
-                    if cur.rowcount!=1:raise contract_failure("candidateCommit","snapshotBindingMissing",category="domain")
+                self._store.owner_truth_live_recovery_repository().publish_snapshot(
+                    snapshot_id=source.source_metadata['snapshotId'],source_id=source.source_id,
+                    manifest=manifest,context=context,authority_epoch=intent.target.authority_epoch)
 
             publication_binding = getattr(
                 self._extractor,

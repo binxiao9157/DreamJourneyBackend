@@ -1,0 +1,10 @@
+{
+  "baseCommit": "cf60ca7e5748f14954eeae52e5d978576e6e9048",
+  "files": {
+    "app/services/owner_truth_live_recovery.py": "a706891d5572051f55fb7ed4c15bb33008e3e797cd6c767e28f63bdf50e24b90",
+    "app/async_effects/owner_truth_candidate_extraction_worker.py": "62640a1f43a409520fc2b3d0fc1022408bc386179ba103c076415bc64b67391d",
+    "tests/test_live_recovery_run_terminal_postgres.py": "ea7b1982b295f3208327622c9596bfc5dad9293a26f47d0e6c3ebd9c14dba455",
+    "scripts/backend-live-recovery-run-terminal-smoke.py": "a718d0445a19c30ce1c53e1aac598511f5bfbe3a607aaba832e8fcf2604735bc"
+  },
+  "scope": "local working tree; not committed or deployed"
+}

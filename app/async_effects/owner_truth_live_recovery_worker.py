@@ -120,6 +120,21 @@ class RecoveryThemeAssembler:
             atoms=page,proposal=proposal,page_key=key)
         return self.provider.validate(atoms=page,proposal=proposal,review=review)
 
+    def _regroup_pages(self, *, repair, blocked):
+        # At most two input partitions; preserve order and normal page limits.
+        # Splitting only rejected groups keeps already verified themes intact
+        # and does not turn every fact into its own user-visible card.
+        second=set()
+        for entry in blocked:
+            if entry.get('groupingRejected') is not True:
+                continue
+            members=[a['atomId'] for a in repair if a['atomId'] in entry['atomIds']]
+            if len(members)>1:
+                second.update(members[(len(members)+1)//2:])
+        partitions=([a for a in repair if a['atomId'] not in second],
+                    [a for a in repair if a['atomId'] in second])
+        return [page for part in partitions if part for page in self.provider.pages(part)]
+
     def organize_pages(self, *, lease,run_id,revision,source_id,catalog):
         if not catalog:return (),(),()
         leaves={a['atomId']:a for a in catalog}
@@ -142,9 +157,10 @@ class RecoveryThemeAssembler:
                         repair=[dict(a,groupingRepair='split-uncertain-events-v1') for a in page
                             if a['atomId'] in page_omitted and a['supportState']=='supported']
                         recovered=set()
-                        for ri,repair_page in enumerate(self.provider.pages(repair) if repair else []):
+                        repair_strategy=('regroup-split-v2' if any(b.get('groupingRejected') is True for b in page_blocked) else 'regroup')
+                        for ri,repair_page in enumerate(self._regroup_pages(repair=repair,blocked=page_blocked)):
                             try:
-                                fixed=self._organize_page(**context,page=repair_page,key=f'{key}:regroup:{ri}')
+                                fixed=self._organize_page(**context,page=repair_page,key=f'{key}:{repair_strategy}:{ri}')
                             except (RecoveryThemePageFailed,LiveLongMemoryBudgetExhausted):
                                 continue
                             page_themes.extend(fixed.themes)

@@ -1,0 +1,15 @@
+{
+  "deployment": "PASS",
+  "repairBranchDevice": "PASS",
+  "shortSaveCandidateFormalColdReadback": "PASS",
+  "natural10SaveAndPublication": "PASS",
+  "natural10FullFormalConfirmation": "INCOMPLETE",
+  "natural10OriginalToolStatus": "FAIL",
+  "natural10FactsPublished": 29,
+  "natural10ThemesPublished": 6,
+  "natural10FormalActive": 12,
+  "natural10PendingFacts": 17,
+  "coldStartStableUI": "AWAITING_USER_OBSERVATION",
+  "physicalAcousticTest": "NOT_RUN",
+  "push": "NOT_RUN"
+}

@@ -1,0 +1,30 @@
+{
+  "iosHead": "0bac73d7195b15aee7e1265b56f0eb9d725cde93",
+  "backendHead": "cf60ca7e5748f14954eeae52e5d978576e6e9048",
+  "iosStatus": " M DreamJourney/Sources/Modules/Echo/EchoViewController.swift\n M DreamJourney/Sources/Services/DialogEngineManager.swift\n M DreamJourneyTests/OwnerTruthContractsTests.swift\n",
+  "backendStatus": " M app/async_effects/owner_truth_candidate_extraction_worker.py\n M app/async_effects/owner_truth_live_recovery_worker.py\n M app/domain/owner_truth/live_topics.py\n M app/services/owner_truth_live_recovery.py\n?? scripts/backend-live-recovery-run-terminal-smoke.py\n?? tests/test_live_recovery_run_terminal_postgres.py\n?? tests/test_live_theme_regroup_boundaries.py\n",
+  "sha256": {
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourney/Sources/Modules/Echo/EchoViewController.swift": "92d63a4a8b4358c2c61250068b7bd89b695f2d08049814a04762ead405fb0876",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourney/Sources/Services/DialogEngineManager.swift": "1bc342a76c03f65e543059b912e33ccb2216191f323a1441433e21099e76489d",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourneyTests/OwnerTruthContractsTests.swift": "8d783fc362bc294ba14cd0d30d3c0098ad98c28672465a2f3b63169fd5b3d7fe",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/Podfile.lock": "810a979c1721f7eabdc6691c1541d9be0ae2db14c8687a093fe64ab945fabbaa",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-live-farewell-provider-voice/run-01/DeviceDerivedData/Build/Products/Debug-iphoneos/DreamJourney.app/DreamJourney": "08684c2e1a5f081e3b33bf07a04a20905a8c20ab11e914f5757bdabe085793cf",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-live-farewell-provider-voice/run-01/DeviceDerivedData/Build/Products/Debug-iphoneos/DreamJourney.app/DreamJourney.debug.dylib": "079cdf857ea899fd48d71305328cb0db6443df7ce54e8058551f4980c6e519f7",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-live-farewell-provider-voice/run-01/provider-farewell-probe.py": "b71e557598494a27f7a6fe0a957eef4696f3753019ccc707f06e085c24dc3280",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-live-farewell-provider-voice/run-01/provider/result.json": "7ba7de70dd95ba02e630c66b80a5fc125561bb09bcea9e7b7754f6ec7e36f202",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-live-farewell-provider-voice/run-01/pg-regression/pg-result.json": "c5e2be1b6a351385158d98d863747f9d5505ec39a3ce0b03733092abeaa007c1",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-live-farewell-provider-voice/run-01/native-final-summary.json": "1607490b0ff385f879069a0beaf10ae088f2b7469dfb98423062ed52d5097ca4",
+    "/Users/gaominge/Documents/liftora/outputs/2026-10-04-live-farewell-provider-voice/run-01/full-summary.json": "77c4d8805562d48a3cccd19fd95d604e1c7d30bdb0fa7cb5e80c99a7c0cb0d65"
+  },
+  "status": {
+    "local": "PASS",
+    "providerProtocol": "PASS",
+    "deployment": "NOT_RUN",
+    "device": "NOT_RUN",
+    "acousticVoiceComparison": "NOT_RUN",
+    "history": "NOT_RUN",
+    "push": "NOT_RUN"
+  },
+  "finalNativeResult": "native-final-04.xcresult",
+  "regressionReuse": "UI_QA_SIMULATOR active branch unchanged after full regression; final production branch separately compiled and tested; device build followed final production change."
+}
