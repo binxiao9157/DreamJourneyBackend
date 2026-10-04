@@ -1,4 +1,130 @@
 #if DEBUG && LIVE_DEVICE_AUTOMATION && targetEnvironment(simulator)
+
+    @MainActor
+    func testLabFarewellPauseCannotHideExistingGapFailure() async throws {
+        let controller = EchoViewController()
+        let (lab, root) = try makeFarewellClockFixture(controller: controller)
+        defer { lab.localStopClockForTesting(); try? FileManager.default.removeItem(at: root) }
+        lab.localFeedOverride = { _ in Thread.sleep(forTimeInterval: 0.55) }
+        lab.localStartClockForTesting()
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while lab.localInputFailureForTesting == nil && ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(lab.localInputFailureForTesting, "audioSchedulerStalled")
+        lab.observeProductInputPaused(controller)
+        XCTAssertFalse(lab.localClockRunningForTesting)
+        let failure = await lab.localWaitChecksInputFailureForTesting()
+        XCTAssertEqual(failure, "audioSchedulerStalled", "Pause must not erase first failure or make wait succeed")
+    }
+    @MainActor
+    func testLabFrozenFailureStillAllowsRecoveryObservation() async throws {
+        let controller = EchoViewController()
+        let (lab, root) = try makeFarewellClockFixture(controller: controller)
+        defer { lab.localStopClockForTesting(); try? FileManager.default.removeItem(at: root) }
+        lab.localFeedOverride = { _ in Thread.sleep(forTimeInterval: 0.55) }
+        lab.localStartClockForTesting()
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while lab.localInputFailureForTesting == nil && ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(lab.localInputFailureForTesting, "audioSchedulerStalled")
+        lab.observeProductInputPaused(controller)
+        lab.localFreezeInputFailureForRecoveryTesting()
+        let failure = await lab.localWaitChecksInputFailureForTesting()
+        XCTAssertNil(failure, "Frozen input error must not block later close/publication observation")
+        XCTAssertEqual(lab.localReportForTesting["failure"] as? String, "audioSchedulerStalled")
+        XCTAssertEqual(lab.localReportForTesting["conversationStatus"] as? String, "FAIL")
+    }
+    @MainActor
+    func testLabFarewellPauseRejectsQueuedInput() async throws {
+        let controller = EchoViewController()
+        let (lab, root) = try makeFarewellClockFixture(controller: controller)
+        defer { lab.localStopClockForTesting(); try? FileManager.default.removeItem(at: root) }
+        lab.localFeedOverride = { _ in }
+        lab.localStartClockForTesting(); lab.localQueueSpeechForTesting()
+        lab.observeProductInputPaused(controller)
+        XCTAssertFalse(lab.localClockRunningForTesting)
+        let failure = await lab.localWaitChecksInputFailureForTesting()
+        XCTAssertEqual(failure, "productPausedWithQueuedInput")
+    }
+    @MainActor
+    func testLabFarewellPauseIgnoresOtherControllerAndShortProfile() throws {
+        for profile in ["10m", "short"] {
+            let controller = EchoViewController()
+            let (lab, root) = try makeFarewellClockFixture(controller: controller, profile: profile)
+            defer { lab.localStopClockForTesting(); try? FileManager.default.removeItem(at: root) }
+            lab.localFeedOverride = { _ in }
+            lab.localStartClockForTesting()
+            lab.observeProductInputPaused(profile == "short" ? controller : EchoViewController())
+            XCTAssertTrue(lab.localClockRunningForTesting)
+            XCTAssertNil(lab.localInputFailureForTesting)
+            XCTAssertNil(lab.localReportForTesting["productClosePhases"])
+        }
+    }
+    @MainActor
+    private func makeFarewellClockFixture(controller: EchoViewController, profile: String = "10m") throws -> (LiveDeviceLabRuntime, URL) {
+        let (runtime, lease) = try makeActiveRuntime()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let manifest: [String: Any] = ["schema": 1, "runID": "lab-0123456789abcdef0123456789abcdef",
+            "profile": profile, "sampleRate": 16000, "channels": 1, "sampleBytes": 2,
+            "minimumDurationSeconds": 600, "maximumDurationSeconds": 900, "turnTimeoutSeconds": 90,
+            "organizationTimeoutSeconds": 1, "maxCandidateWrites": 0, "requiredMemoryTerms": [], "turns": []]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
+        let lab = try LiveDeviceLabRuntime.localRecoveryFixture(root: root, runID: "lab-0123456789abcdef0123456789abcdef",
+            client: .shared, runtime: runtime, lease: lease, echo: controller, capture: nil)
+        return (lab, root)
+    }
+    @MainActor
+    func testLabProductFarewellPausesClockAndCompletesWithoutLabStop() throws {
+        try verifyLabFarewellClock(deadline: false)
+    }
+    @MainActor
+    func testLabProductFarewellMissingCallbackUsesProductDeadlineWithoutLabStop() throws {
+        try verifyLabFarewellClock(deadline: true)
+    }
+    @MainActor
+    private func verifyLabFarewellClock(deadline: Bool) throws {
+        let controller = EchoViewController()
+        let (lab, root) = try makeFarewellClockFixture(controller: controller)
+        defer { lab.localStopClockForTesting(); LiveDeviceLabRuntime.active = nil; try? FileManager.default.removeItem(at: root) }
+        LiveDeviceLabRuntime.active = lab
+        var done: (() -> Void)?; var feeds = 0
+        lab.localFeedOverride = { _ in feeds += 1 }
+        controller.beginLiveLimitForTesting(now: 0, pause: { true }, playback: { _, completion in done = completion })
+        lab.localStartClockForTesting()
+        XCTAssertTrue(waitForOwnerTruthHTTPUI(timeout: 2) { feeds > 0 })
+        controller.tickLiveLimitForTesting(now: 600, busy: false)
+        XCTAssertFalse(lab.localClockRunningForTesting, "Product pause must stop STREAM input before local farewell")
+        let countAtPause = feeds
+        _ = waitForOwnerTruthHTTPUI(timeout: 0.1) { false }
+        XCTAssertEqual(feeds, countAtPause, "No silence feeds after product pause")
+        XCTAssertTrue(controller.liveLimitSessionOpenForTesting, "Lab must not close during farewell")
+        if deadline {
+            controller.tickLiveLimitForTesting(now: 619, busy: false)
+            XCTAssertTrue(controller.liveLimitSessionOpenForTesting)
+            controller.tickLiveLimitForTesting(now: 620, busy: false)
+        } else { try XCTUnwrap(done)() }
+        XCTAssertFalse(controller.liveLimitSessionOpenForTesting)
+        XCTAssertNil(lab.localInputFailureForTesting)
+        XCTAssertNil(lab.localReportForTesting["stopOrigin"], "Only product closes the scene")
+    }
+    @MainActor
+    func testLabActiveSilenceAndSpeechGapsStillFail() throws {
+        for speech in [false, true] {
+            let controller = EchoViewController()
+            let (lab, root) = try makeFarewellClockFixture(controller: controller)
+            defer { lab.localStopClockForTesting(); try? FileManager.default.removeItem(at: root) }
+            var feeds = 0
+            lab.localFeedOverride = { _ in feeds += 1; Thread.sleep(forTimeInterval: 0.55) }
+            lab.localStartClockForTesting()
+            if speech { lab.localQueueSpeechForTesting() }
+            XCTAssertTrue(waitForOwnerTruthHTTPUI(timeout: 3) { lab.localInputFailureForTesting != nil })
+            XCTAssertEqual(lab.localInputFailureForTesting, "audioSchedulerStalled")
+            XCTAssertEqual(feeds, 1, "No burst catch-up after delay")
+        }
+    }
     private final class RecoveryLocalTimeline {
         private let lock = NSLock()
         private var rows: [[String: Any]] = []

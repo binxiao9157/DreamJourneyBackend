@@ -23,9 +23,29 @@ extension EchoViewController {
     var labLimitSnapshot: [String: Any] {
         ["startedAt": liveSessionLimit.startedAt ?? -1,
          "farewellAt": liveSessionLimit.farewellAt ?? -1,
+         "farewellBudget": liveSessionLimit.farewellBudget,
          "closed": liveSessionLimit.closed,
          "liveOpen": isUserControlledLiveSessionOpen,
          "observationUptime": ProcessInfo.processInfo.systemUptime]
+    }
+    func labObservedRecoveryProgress(for captured: EchoLiveMemoryCaptureCoordinator?) -> OwnerTruthLiveRecoveryProgress? {
+        // The product releases active capture after durable close. The lab retains
+        // this exact scene; never select another scene from the page or outbox.
+        guard let captured else { return nil }
+        let id = captured.labProductSessionID
+        let progress = publicationObservers[id]?.latest ?? captured.labRecoveryProgress
+        guard progress?.sessionBinding?.productSessionId == id else { return nil }
+        return progress
+    }
+    var labOrbObservation: [String: Any] {
+        ["metalReady": cloudOrb.hasMetalRenderer, "active": cloudOrb.active,
+         "renderedInput": cloudOrb.renderedLevels.x, "renderedOutput": cloudOrb.renderedLevels.y,
+         "composerHidden": composer.isHidden, "liveOpen": isUserControlledLiveSessionOpen,
+         "replyCharacters": quoteLabel.text?.count ?? 0,
+         "replyViewportHeight": quoteLabel.bounds.height,
+         "microphoneEnabled": micButton.isEnabled,
+         "notificationButtonVisible": !messageCenterBellButton.isHidden,
+         "sceneEntryCount": transcriptEntries.count]
     }
     var labStatusText: String { voiceStatusLabel.text ?? "" }
     func labTapMicrophone() throws {

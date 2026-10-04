@@ -2,16 +2,24 @@
 
 This tool runs synthetic speech through the **actual iPhone SpeechEngine SDK**, the app's current provider-owned answer and native SDK playback path, Live persistence, candidate review and formal-memory APIs. It is not a mocked SDK test or an acoustic microphone test.
 
-**2026-09-29 latest status:** two new physical short scenes passed candidate review, formal activation and cold readback (3 and 4 formal proofs). Final STAGE07 short passed before LONG20. LONG20 failed at 1017.708 seconds: 32 completed audio exchanges, 31 persisted server turns, 24 turns preorganized into 16 internal atoms, **zero published candidates**. The immediate stop was `audioSchedulerStalled` (0.523595-second frame gap); final close/Source/publication did not complete. Root cause remains unproven. The user requests discussion before further changes or tests.
+**2026-09-29 historical status:** two new physical short scenes passed candidate review, formal activation and cold readback (3 and 4 formal proofs). Final STAGE07 short passed before LONG20. LONG20 failed at 1017.708 seconds: 32 completed audio exchanges, 31 persisted server turns, 24 turns preorganized into 16 internal atoms, **zero published candidates**. The immediate stop was `audioSchedulerStalled` (0.523595-second frame gap); final close/Source/publication did not complete. Root cause remains unproven. The user requests discussion before further changes or tests.
 
 See [current device evidence and analysis](/Users/gaominge/Documents/liftora/outputs/2026-09-29-live-playback-device-retest/run-01/README.md). Prior failed runs remain preserved. Do not replay them.
+
+## 2026-10-04 告别阶段输入与观测修复
+
+十分钟场以真实 Controller 的 recorder pause 成功作为合成 PCM 停止点；工具不会替代产品调用结束，也不会伪造告别完成或 SDK 事件。产品原有告别完成回调及 20 秒兜底不变；测试额外 10 秒仅用于观察真实关闭。暂停时仍有排队输入则明确失败。
+
+活动期语音/静音 0.5 秒调度门槛不变。暂停不能清除首错；首错冻结后仍继续原场的有界停止和发布观察，恢复不覆盖对话 FAIL。报告增加五个首达时点，区分暂停、告别回调、进入停止、SDK 停止前封存、SDK 停止返回。此记录只证明对应代码点到达，不单独证明远端持久化。
+
+隔离副本注入受 DEBUG + LIVE_DEVICE_AUTOMATION 双门控，正常产品源码未改。本轮本地证据见 [实施与验证](../../02-问题修复/测试与验收/2026-10-04-十分钟告别阶段测试干预/实施与验证.md)。旧真机 0.6038 秒停顿来源仍未决，旧 FAIL 不改写；新工具必须重新 stage/build、通过同版独立短场后才能做十分钟验收。
 
 ## Scope and current safety rules
 
 - Use only an explicitly authorized account. This run is authorized for the user's current test/demo account.
 - Build an isolated copy of the current iOS workspace. The user's original checkout is not patched or reset.
 - Instrumentation requires both `DEBUG` and `LIVE_DEVICE_AUTOMATION`. The SDK's recorder changes to STREAM only for an explicit lab `run` launch.
-- Mac `say` writes synthetic speech to a file; it never plays it. iPhone uses 16 kHz mono signed 16-bit PCM in physical 20 ms frames. `feedAudio` length is **Int16 sample count**, not bytes. A single producer continues sending zero-valued frames while idle or awaiting a reply, as a real microphone continues capturing. The clock stops before the real stop action.
+- Mac `say` writes synthetic speech to a file; it never plays it. iPhone uses 16 kHz mono signed 16-bit PCM in physical 20 ms frames. `feedAudio` length is **Int16 sample count**, not bytes. A single producer continues sending zero-valued frames while idle or awaiting a reply, as a real microphone continues capturing. The clock stops before the real stop action; for the 10-minute profile it also stops immediately after the real Controller successfully pauses recorder input for farewell.
 - Keep the actual app player enabled. By default preflight verifies system media volume is zero; the user explicitly waived muting for the 9/29 run, using `--allow-audible`. This flag does not disable playback or change memory acceptance. The tool attempts a test-only system volume control when needed; on this iPhone that automatic setting did not take effect, so the user set the Control Center media slider to zero. Do not confuse the silent switch with media volume. Silent output does not prove the speaker or microphone hardware.
 - Current product Live is provider-owned (`DialogLiveGroundingPlan.sessionSnapshot`), not a delegated `/echo/answers` turn loop. The product now observes actual **player and decoder** PCM. Completion requires matching reply/generation, exact nonzero sample counts and hashes, synthesis end and 200 ms of observed silent player PCM. No timer or synthetic SDK event can satisfy this proof. Decoded audio alone does not prove playback completion.
 - Do not inject ASR/final events, bypass FeatureGate, seed candidates or alter the production server to make a run pass.

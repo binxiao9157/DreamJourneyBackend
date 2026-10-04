@@ -86,18 +86,37 @@ def stage_workspace(repo, dest):
     p.write_text(text)
 
     p = base/'Modules/Echo/EchoViewController.swift'
-    original = p.read_text()
+    original = replace_once(p.read_text(),
+        '        cloudOrb.receiveAudioLevel(sample.level, channel: sample.channel, capturedAt: sample.capturedAt)',
+        '        cloudOrb.receiveAudioLevel(sample.level, channel: sample.channel, capturedAt: sample.capturedAt)\n' + GUARD +
+        '\n        LiveDeviceLabRuntime.active?.observeOrbSample(sample)\n#endif')
     p.write_text(replace_once(original, '    private func enqueueCanonicalPersistence(_ operation: CanonicalPersistenceOperation) {',
         '    private func enqueueCanonicalPersistence(_ operation: CanonicalPersistenceOperation) {\n' + GUARD +
         '\n        let labEvent: NativeLiveCanonicalTranscriptEvent?\n        switch operation {\n        case .event(let event): labEvent = event\n        case .frozenHandoff(_, let event): labEvent = event\n        case .member: labEvent = nil\n        }\n        if let labEvent {\n            let labSession = productSessionID\n            Task { @MainActor in LiveDeviceLabRuntime.active?.observeCanonical(labEvent, productSessionID: labSession) }\n        }\n#endif'))
-    text = replace_once(p.read_text(), '        quoteLabel.text = latestEntry.text',
-        '        quoteLabel.text = latestEntry.text\n' + GUARD +
-        '\n        LiveDeviceLabRuntime.active?.observeDisplay(latestEntry.text, isUser: latestEntry.isUser)\n#endif')
+    text = replace_once(p.read_text(), '        transcriptEntries.append((text: text, isUser: isUser))',
+        '        transcriptEntries.append((text: text, isUser: isUser))\n' + GUARD +
+        '\n        LiveDeviceLabRuntime.active?.observeDisplay(text, isUser: isUser)\n#endif')
     text = replace_once(text,
         '        guard validateEchoAccountLease(at: .request, reason: "viewDidAppear") else {',
         '#if DEBUG && LIVE_DEVICE_AUTOMATION && targetEnvironment(simulator)\n'
         '        LiveDeviceLabRuntime.localEchoDidAppear?(self)\n#endif\n'
         '        guard validateEchoAccountLease(at: .request, reason: "viewDidAppear") else {')
+    text = replace_once(text,
+        '            guard paused else {\n                stopVoiceCapture(); return\n            }\n            let identity = liveSessionLimitIdentity',
+        '            guard paused else {\n                stopVoiceCapture(); return\n            }\n' + GUARD +
+        '\n            LiveDeviceLabRuntime.active?.observeProductInputPaused(self)\n#endif\n            let identity = liveSessionLimitIdentity')
+    text = replace_once(text,
+        '                      self.isUserControlledLiveSessionOpen else { return }\n                self.stopVoiceCapture()\n            }\n            if let playback = liveLimitPlaybackForTesting',
+        '                      self.isUserControlledLiveSessionOpen else { return }\n' + GUARD +
+        '\n                LiveDeviceLabRuntime.active?.observeProductClosePhase("farewellCallback", controller: self)\n#endif\n                self.stopVoiceCapture()\n            }\n            if let playback = liveLimitPlaybackForTesting')
+    text = replace_once(text, '    private func stopVoiceCapture() {',
+        '    private func stopVoiceCapture() {\n' + GUARD +
+        '\n        LiveDeviceLabRuntime.active?.observeProductClosePhase("stopVoiceCaptureEntry", controller: self)\n#endif')
+    text = replace_once(text,
+        '                self.flushPendingAIReplyIfNeeded()\n                self.finishLiveMemoryCaptureIfNeeded()\n            }\n        } else {\n            isStoppingVoiceCaptureManually = false',
+        '                self.flushPendingAIReplyIfNeeded()\n                self.finishLiveMemoryCaptureIfNeeded()\n' + GUARD +
+        '\n                LiveDeviceLabRuntime.active?.observeProductClosePhase("inputSealedBeforeNativeStop", controller: self)\n#endif\n            }\n' + GUARD +
+        '\n            LiveDeviceLabRuntime.active?.observeProductClosePhase("nativeStopReturned", controller: self)\n#endif\n        } else {\n            isStoppingVoiceCaptureManually = false')
     p.write_text(text + '\n' + (HERE/'ios/EchoLabBridge.swift').read_text())
     p = base/'Modules/Archive/MemoryArchiveViewController.swift'
     p.write_text(p.read_text() + '\n' + (HERE/'ios/ArchiveLabBridge.swift').read_text())

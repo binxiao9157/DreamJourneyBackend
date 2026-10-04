@@ -103,6 +103,18 @@ final class LiveDeviceLabRuntime {
     private var vault: OwnerTruthVaultID?
     private var startedAt = ProcessInfo.processInfo.systemUptime
     private var report: [String: Any] = [:]
+    func observeOrbSample(_ sample: DialogOrbAudioSample) {
+        let prefix = sample.channel == .input ? "input" : "output"
+        var stats = report["orbSamples"] as? [String: Any] ?? [:]
+        stats[prefix + "Count"] = (stats[prefix + "Count"] as? Int ?? 0) + 1
+        stats[prefix + "Peak"] = max(stats[prefix + "Peak"] as? Float ?? 0, sample.level)
+        if let visual = echo?.labOrbObservation {
+            stats["renderedInputPeak"] = max(stats["renderedInputPeak"] as? Float ?? 0, visual["renderedInput"] as? Float ?? 0)
+            stats["renderedOutputPeak"] = max(stats["renderedOutputPeak"] as? Float ?? 0, visual["renderedOutput"] as? Float ?? 0)
+        }
+        report["orbSamples"] = stats
+    }
+
     private var asrFinals: [(text: String, questionID: String?)] = []
     private var acceptedASRByTurn: [String] = [] // Legacy proof only; never recovery authority.
     private var evidenceLedger = LiveLabEvidenceLedger()
@@ -156,6 +168,21 @@ final class LiveDeviceLabRuntime {
     #if targetEnvironment(simulator)
     var localFeedOverride: ((Data) throws -> Void)?
     func localStopClockForTesting() { stopAudioClock() }
+    func localStartClockForTesting() { startAudioClock() }
+    var localClockRunningForTesting: Bool { audioClock != nil }
+    var localInputFailureForTesting: String? { inputFailure }
+    var localReportForTesting: [String: Any] { report }
+    func localWaitChecksInputFailureForTesting() async -> String? {
+        do { try await wait("localPauseCheck", seconds: 0.1) { true }; return nil }
+        catch LiveDeviceLabError.check(let code) { return code }
+        catch { return "unexpected" }
+    }
+
+
+    func localFreezeInputFailureForRecoveryTesting() {
+        report["failure"] = inputFailure
+        report["conversationStatus"] = "FAIL"
+    }
     func localQueueSpeechForTesting() { queuedSpeech = Data(repeating: 1, count: 64000); queuedSpeechOffset = 0 }
     static var localEchoDidAppear: ((EchoViewController) -> Void)?
     static func localRecoveryFixture(root: URL, runID: String, client: DreamJourneyBackendClient,
@@ -414,7 +441,7 @@ final class LiveDeviceLabRuntime {
     private func observeFailureRecovery(_ m: LiveDeviceLabManifest) async {
         let start = ProcessInfo.processInfo.systemUptime
         var duration = m.organizationTimeoutSeconds
-        if let progress = capture?.labRecoveryProgress, let budget = progress.observationBudget,
+        if let progress = echo?.labObservedRecoveryProgress(for: capture), let budget = progress.observationBudget,
            let requestDeadline = budget.requestDeadlineSeconds, let remaining = budget.remainingProviderRequests,
            let absolute = budget.organizationAbsoluteRemainingSeconds {
             func parse(_ value: String) -> Date? {
@@ -450,7 +477,7 @@ final class LiveDeviceLabRuntime {
             do { try assertAccount() } catch {
                 report["recoveryStatus"] = "FAIL"; report["recoveryFailure"] = "accountLeaseChanged"; return
             }
-            if let progress = capture?.labRecoveryProgress {
+            if let progress = echo?.labObservedRecoveryProgress(for: capture) {
                 report["recoveryProgress"] = ["version": progress.version,
                     "continuousSequence": progress.continuousSequence, "highestSeenSequence": progress.highestSeenSequence,
                     "missingRanges": progress.missingRanges, "snapshotRevision": progress.snapshotRevision,
@@ -655,7 +682,14 @@ final class LiveDeviceLabRuntime {
         }
         if m.profile == "10m" {
             try publish("awaitingProductNaturalClose")
-            try await wait("productNaturalClose", seconds: max(1, m.maximumDurationSeconds - elapsed)) {
+            let snapshot = echo.labLimitSnapshot
+            let now = ProcessInfo.processInfo.systemUptime
+            let farewell = snapshot["farewellAt"] as? Double ?? -1
+            let productBudget = snapshot["farewellBudget"] as? Double ?? 20
+            let remaining = farewell >= 0 ? max(0, farewell + productBudget + 10 - now)
+                : max(0, m.maximumDurationSeconds - elapsed)
+            report["naturalCloseObservationBudgetSeconds"] = remaining
+            try await wait("productNaturalClose", seconds: max(0.1, remaining)) {
                 !echo.labIsLiveOpen && !DialogEngineManager.shared.isDialogActive
             }
             report["naturalCloseEvidence"] = echo.labLimitSnapshot
@@ -679,10 +713,11 @@ final class LiveDeviceLabRuntime {
         if m.profile != "10m" { try echo.labTapMicrophone() }
         try await wait("pendingReview", seconds: m.organizationTimeoutSeconds) {
             guard let capture = self.capture else { return false }
-            if capture.state.isTerminal && capture.state != .pendingReview {
-                throw LiveDeviceLabError.check("capture_\(String(describing: capture.state))")
-            }
-            return capture.state == .pendingReview && capture.labRecoveryProgress?.publication?.state == "published"
+            guard let progress = echo.labObservedRecoveryProgress(for: capture) else { return false }
+            if progress.publication?.state == "failed" { throw LiveDeviceLabError.check("publicationFailed") }
+            return progress.publication?.state == "published"
+                && echo.labStatusText.contains("整理完成")
+
         }
         try publish("pendingReview")
     }
@@ -691,7 +726,7 @@ final class LiveDeviceLabRuntime {
         guard !memoryConfirmationStarted else { throw LiveDeviceLabError.check("confirmationReplayBlocked") }
         memoryConfirmationStarted = true
         try assertAccount()
-        guard let capture, let progress = capture.labRecoveryProgress, let lease, let vault,
+        guard let capture, let progress = echo.labObservedRecoveryProgress(for: capture), let lease, let vault,
               progress.publication?.state == "published",
               !progress.rangePageTruncated else {
             // A partial label may retain a recovered diagnostic. Actual source binding,
@@ -714,12 +749,12 @@ final class LiveDeviceLabRuntime {
             let remaining = bindingDeadline - ProcessInfo.processInfo.systemUptime
             guard remaining > 0 else { throw LiveDeviceLabError.check("sourceIdentityReadOnlyVerificationTimeout") }
             try await wait("sourceIdentityReadOnlyVerification", seconds: remaining) {
-                if self.capture?.labRecoveryProgress?.publication?.snapshotRevision != proofRequest["snapshotRevision"] as? Int { return true }
+                if self.echo?.labObservedRecoveryProgress(for: self.capture)?.publication?.snapshotRevision != proofRequest["snapshotRevision"] as? Int { return true }
                 guard let data = try? Data(contentsOf: bindingURL),
                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
                 return object["requestID"] as? String == proofRequest["requestID"] as? String
             }
-            guard let current = capture.labRecoveryProgress, current.publication?.state == "published",
+            guard let current = echo.labObservedRecoveryProgress(for: capture), current.publication?.state == "published",
                   let revision = current.publication?.snapshotRevision else { throw LiveDeviceLabError.check("bindingPublicationChanged") }
             if revision == proofRequest["snapshotRevision"] as? Int { break }
             durable = try capture.labDurableMessages()
@@ -741,7 +776,7 @@ final class LiveDeviceLabRuntime {
         guard binding["status"] as? String == "VERIFIED", binding["readOnly"] as? Bool == true,
               binding["messageCount"] as? Int == durable.count,
               let snapshotHash = binding["snapshotHash"] as? String, snapshotHash.count == 64,
-              capture.labRecoveryProgress?.publication?.snapshotRevision == proofRequest["snapshotRevision"] as? Int,
+              echo.labObservedRecoveryProgress(for: capture)?.publication?.snapshotRevision == proofRequest["snapshotRevision"] as? Int,
               let raw = binding["sourceID"] as? String, let sid = UUID(uuidString: raw) else {
             throw LiveDeviceLabError.check("sourceBindingMismatch")
         }
@@ -980,6 +1015,26 @@ final class LiveDeviceLabRuntime {
         try publish("coldReadback")
     }
 
+    // Product pause is authoritative: STREAM replaces the microphone, so it
+    // must stop exactly where the real recorder stops accepting new input.
+    func observeProductInputPaused(_ controller: EchoViewController) {
+        guard echo === controller, manifest?.profile == "10m" else { return }
+        observeProductClosePhase("farewellInputPaused", controller: controller)
+        if queuedSpeech != nil && inputFailure == nil {
+            inputFailure = "productPausedWithQueuedInput"
+        }
+        stopAudioClock()
+        report["audioInputStoppedByProductPause"] = true
+    }
+    func observeProductClosePhase(_ phase: String, controller: EchoViewController) {
+        guard echo === controller, manifest?.profile == "10m",
+              ["farewellInputPaused", "farewellCallback", "stopVoiceCaptureEntry",
+               "inputSealedBeforeNativeStop", "nativeStopReturned"].contains(phase) else { return }
+        var phases = report["productClosePhases"] as? [String: Double] ?? [:]
+        if phases[phase] == nil { phases[phase] = elapsed }
+        report["productClosePhases"] = phases
+    }
+
     private func startAudioClock() {
         guard audioClock == nil else { return }
         inputFailure = nil
@@ -1093,8 +1148,11 @@ final class LiveDeviceLabRuntime {
     private func wait(_ name: String, seconds: Double, predicate: () throws -> Bool) async throws {
         let deadline = ProcessInfo.processInfo.systemUptime + seconds
         while ProcessInfo.processInfo.systemUptime < deadline {
+            // A pause must not hide a failure already observed before it.
+            // Once handleFailure has frozen the first error, recovery waits must
+            // still observe close/publication without replaying that same error.
+            if report["failure"] == nil, let inputFailure { throw LiveDeviceLabError.check(inputFailure) }
             if audioClock != nil {
-                if let inputFailure { throw LiveDeviceLabError.check(inputFailure) }
                 if providerFailed { throw LiveDeviceLabError.check("providerEngineError") }
             }
             if try predicate() { return }
@@ -1191,6 +1249,11 @@ final class LiveDeviceLabRuntime {
         if let capture { report["capture"] = capture.labSnapshot }
         if let echo {
             report["pageStatus"] = echo.labStatusText
+            report["orbUI"] = echo.labOrbObservation
+            report["displayObservationBoundary"] = "acceptedCurrentSessionTranscriptAndAssistantPreview; userTextInExpandableHistory"
+            if let observed = echo.labObservedRecoveryProgress(for: capture) {
+                report["pageObservedPublication"] = ["state": observed.publication?.state ?? "", "themeCount": observed.publication?.themeCount ?? 0, "version": observed.version]
+            }
             report["liveLimitObservation"] = echo.labLimitSnapshot
         }
         try Self.write(report, to: root.appendingPathComponent("result.json"))
