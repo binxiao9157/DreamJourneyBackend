@@ -455,6 +455,74 @@ def _is_lossless_refinement(
     return changed
 
 
+def _is_same_source_repetition(
+    *,
+    candidate: OwnerTruthCandidateSnapshot,
+    candidate_content: Mapping[str, Any],
+    target: OwnerTruthCurrentFormalMemory,
+    target_content: Mapping[str, Any],
+) -> bool:
+    """Recognize narrowly bounded extractor drift without rewriting a fact.
+
+    Source identity is not semantic similarity. Require the same explicit
+    statement and business content as well, and leave dates, opposing polarity,
+    concrete scope changes and new detail to the existing review rules.
+    """
+
+    def source_versions(refs: Iterable[Mapping[str, Any]]) -> set[tuple[str, int]]:
+        result = set()
+        for ref in refs:
+            span = ref.get("span")
+            version = ref.get("sourceVersion")
+            if not isinstance(span, Mapping) or type(version) is not int or version < 1:
+                return set()
+            start, end = span.get("start"), span.get("end")
+            if type(start) is not int or type(end) is not int or not 0 <= start < end:
+                return set()
+            source_id = _visible_text(ref.get("sourceId"))
+            if not source_id:
+                return set()
+            result.add((source_id, version))
+        return result
+
+    sources = source_versions(candidate.source_refs)
+    if len(sources) != 1 or not sources.issubset(source_versions(target.evidence_refs)):
+        return False
+    statement = _visible_text(candidate_content.get("statement"))
+    if not statement or statement != _visible_text(target_content.get("statement")):
+        return False
+    if any(_meaningful_time_key(content) != ("", "", "", "")
+           for content in (candidate_content, target_content)):
+        return False
+
+    incoming, existing = _qualifiers(candidate_content), _qualifiers(target_content)
+    for field in set(incoming) | set(existing):
+        proposed, previous = incoming.get(field), existing.get(field)
+        if field in {"currentApplicability", "validTime"}:
+            continue
+        if _semantic_value_is_unspecified(proposed):
+            continue
+        if field == "scenario":
+            # Only an optional Chinese temporal suffix, never general fuzzy
+            # matching (e.g. home and work must remain distinct scopes).
+            def scenario(value: Any) -> str:
+                text = _visible_text(value)
+                return text[:-1] if len(text) > 1 and text.endswith("时") else text
+            if scenario(proposed) != scenario(previous):
+                return False
+        elif proposed != previous:
+            return False
+
+    ignored = {"qualifiers", "provenance", "sourceTurnIndices", "semantic", "facets", "dimensions"}
+    # Derived indexes may lose extracted entries. They are not used to replace
+    # reviewed content: ADD_EVIDENCE preserves the target and unions only refs.
+    def business_content(content: Mapping[str, Any]) -> dict[str, Any]:
+        result = {key: value for key, value in content.items() if key not in ignored}
+        result["statement"] = _visible_text(content.get("statement"))
+        return result
+    return business_content(candidate_content) == business_content(target_content)
+
+
 def _explicit_correction(candidate: OwnerTruthCandidateSnapshot) -> str | None:
     payload = candidate.payload
     for field in ("correctionOfMemoryVersionId", "targetMemoryVersionId"):
@@ -952,6 +1020,25 @@ def build_memory_changeset(
                         else "polarityConflictsAtUncertainTime"
                     ),
                     changed_fields=("qualifiers.polarity", "qualifiers.validTime"),
+                    added_evidence_count=len(new_evidence),
+                )
+            elif _is_same_source_repetition(
+                candidate=candidate,
+                candidate_content=candidate_content,
+                target=target,
+                target_content=target_content,
+            ):
+                operation = _operation(
+                    kind=(
+                        OwnerTruthMemoryChangeOperationKind.ADD_EVIDENCE
+                        if new_evidence
+                        else OwnerTruthMemoryChangeOperationKind.DUPLICATE
+                    ),
+                    candidate=candidate,
+                    candidate_content=candidate_content,
+                    target=target,
+                    reason="sameSourceExactStatementPreservesReviewedFact",
+                    changed_fields=("evidenceRefs",) if new_evidence else (),
                     added_evidence_count=len(new_evidence),
                 )
             elif scopes_differ and scope_is_meaningful:

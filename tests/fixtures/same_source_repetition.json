@@ -1,0 +1,721 @@
+[
+  {
+    "id": "17864bf9-dae3-5223-985b-edb60d645874",
+    "decision_status": "pending",
+    "payload": {
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容。",
+        "affect": null,
+        "facets": {
+          "time": [
+            {
+              "value": "提前 10 分钟到教室",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                13
+              ]
+            }
+          ],
+          "goals": [],
+          "habits": [
+            {
+              "value": "上陶艺课提前 10 分钟到教室复习上次的内容",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                13
+              ]
+            }
+          ],
+          "people": [],
+          "places": [
+            {
+              "value": "教室",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                13
+              ]
+            }
+          ],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": null,
+        "summary": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容。",
+        "factType": "habit",
+        "semantic": {
+          "title": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "entities": [
+            {
+              "name": "教室",
+              "confidence": 1.0,
+              "entityType": "place",
+              "evidenceMode": "ownerStated"
+            }
+          ],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "occurred",
+        "statement": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容。",
+        "dimensions": [
+          "lifeEvents",
+          "habits"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": {
+            "label": "教室",
+            "category": null,
+            "entityId": null
+          },
+          "polarity": "positive",
+          "scenario": "陶艺入门课",
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "current"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          13
+        ]
+      },
+      "confidence": 0.0,
+      "reviewMode": "single",
+      "sensitivity": "standard",
+      "evidenceRefs": [
+        {
+          "span": {
+            "end": 367,
+            "start": 316
+          },
+          "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+          "sourceVersion": 1
+        }
+      ],
+      "proposalHash": "4e7ac931adbb9a5bd4f347a0cc9af771ed2ad2e4183e474dbd6366fac6d79aca",
+      "candidateKind": "experience",
+      "schemaVersion": "owner-truth-candidate-proposal-v1",
+      "epistemicStatus": "recalled",
+      "perspectiveType": "firstPerson",
+      "contentSchemaVersion": "owner-truth-v5"
+    },
+    "topic_id": "f16a96be-d58c-5fdf-b608-f297f13e2237"
+  },
+  {
+    "id": "5c66e033-f6ad-534a-9771-27c74ab11a9d",
+    "decision_status": "pending",
+    "payload": {
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容。",
+        "affect": null,
+        "facets": {
+          "time": [],
+          "goals": [],
+          "habits": [
+            {
+              "value": "上陶艺课提前 10 分钟到教室复习上次的内容",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                29
+              ]
+            }
+          ],
+          "people": [],
+          "places": [],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": null,
+        "summary": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容。",
+        "factType": "habit",
+        "semantic": {
+          "title": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "entities": [],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "occurred",
+        "statement": "我上陶艺课会提前 10 分钟到教室，留一点时间复习上次的内容。",
+        "dimensions": [
+          "lifeEvents",
+          "habits"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": null,
+          "polarity": "unknown",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "historical"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          29
+        ]
+      },
+      "confidence": 0.0,
+      "reviewMode": "single",
+      "sensitivity": "standard",
+      "evidenceRefs": [
+        {
+          "span": {
+            "end": 764,
+            "start": 713
+          },
+          "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+          "sourceVersion": 1
+        }
+      ],
+      "proposalHash": "f4ed668b558ea32248f916a58d8d883600fc7f8ebbea8096a059bfe2ee5ed9e6",
+      "candidateKind": "experience",
+      "schemaVersion": "owner-truth-candidate-proposal-v1",
+      "epistemicStatus": "recalled",
+      "perspectiveType": "firstPerson",
+      "contentSchemaVersion": "owner-truth-v5"
+    },
+    "topic_id": "f16a96be-d58c-5fdf-b608-f297f13e2237"
+  },
+  {
+    "id": "9cef2f05-c66d-57fb-818b-152183fc47c1",
+    "decision_status": "pending",
+    "payload": {
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍。",
+        "affect": null,
+        "facets": {
+          "time": [],
+          "goals": [],
+          "habits": [],
+          "people": [
+            {
+              "value": "老师",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                39
+              ]
+            }
+          ],
+          "places": [],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": null,
+        "summary": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍。",
+        "factType": "preference",
+        "semantic": {
+          "title": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍",
+          "facets": [
+            "lifeEvent",
+            "relationship"
+          ],
+          "entities": [
+            {
+              "name": "老师",
+              "confidence": 1.0,
+              "entityType": "person",
+              "evidenceMode": "ownerStated"
+            }
+          ],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "prefers",
+        "statement": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍。",
+        "dimensions": [
+          "lifeEvents",
+          "relationships",
+          "knowledgeSkills",
+          "preferences"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": null,
+          "polarity": "positive",
+          "scenario": "学习陶艺时",
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": "喜欢",
+          "superlativeAsserted": false,
+          "currentApplicability": "unknown"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          39
+        ]
+      },
+      "confidence": 0.0,
+      "reviewMode": "single",
+      "sensitivity": "standard",
+      "evidenceRefs": [
+        {
+          "span": {
+            "end": 1010,
+            "start": 966
+          },
+          "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+          "sourceVersion": 1
+        }
+      ],
+      "proposalHash": "33a2a73e7597073462a5d027235ba1211876609144185ccd50b560c3412376a7",
+      "candidateKind": "experience",
+      "schemaVersion": "owner-truth-candidate-proposal-v1",
+      "epistemicStatus": "recalled",
+      "perspectiveType": "firstPerson",
+      "contentSchemaVersion": "owner-truth-v5"
+    },
+    "topic_id": "ab685e64-55e5-52db-82ee-596b1aac5da1"
+  },
+  {
+    "id": "1a63fbb2-248a-5b3c-824b-2c605c52d5d0",
+    "decision_status": "pending",
+    "payload": {
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍。",
+        "affect": null,
+        "facets": {
+          "time": [],
+          "goals": [],
+          "habits": [],
+          "people": [],
+          "places": [],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": null,
+        "summary": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍。",
+        "factType": "preference",
+        "semantic": {
+          "title": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍",
+          "facets": [
+            "lifeEvent"
+          ],
+          "entities": [],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "prefers",
+        "statement": "我学习陶艺时喜欢先看老师示范，再自己慢慢做一遍。",
+        "dimensions": [
+          "lifeEvents",
+          "preferences"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": null,
+          "polarity": "positive",
+          "scenario": "学习陶艺",
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": "喜欢",
+          "superlativeAsserted": false,
+          "currentApplicability": "unknown"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          23
+        ]
+      },
+      "confidence": 0.0,
+      "reviewMode": "single",
+      "sensitivity": "standard",
+      "evidenceRefs": [
+        {
+          "span": {
+            "end": 613,
+            "start": 569
+          },
+          "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+          "sourceVersion": 1
+        }
+      ],
+      "proposalHash": "13d0b32b8f56ce60804230a9c52dee6a4aeb6f04569891762b77ed73449770ab",
+      "candidateKind": "experience",
+      "schemaVersion": "owner-truth-candidate-proposal-v1",
+      "epistemicStatus": "recalled",
+      "perspectiveType": "firstPerson",
+      "contentSchemaVersion": "owner-truth-v5"
+    },
+    "topic_id": "ab685e64-55e5-52db-82ee-596b1aac5da1"
+  },
+  {
+    "id": "afe3d451-baec-50c4-b3ed-667e18a5af98",
+    "decision_status": "accepted",
+    "payload": {
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "我练习陶艺时会把手机放远一点，这样更容易专心。",
+        "affect": null,
+        "facets": {
+          "time": [],
+          "goals": [],
+          "habits": [
+            {
+              "value": "练习陶艺时把手机放远一点",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                25
+              ]
+            }
+          ],
+          "people": [],
+          "places": [],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": null,
+        "summary": "我练习陶艺时会把手机放远一点，这样更容易专心。",
+        "factType": "habit",
+        "semantic": {
+          "title": "我练习陶艺时会把手机放远一点，这样更容易专心",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "entities": [],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "我练习陶艺时会把手机放远一点，这样更容易专心。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "does",
+        "statement": "我练习陶艺时会把手机放远一点，这样更容易专心。",
+        "dimensions": [
+          "lifeEvents",
+          "habits"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": null,
+          "polarity": "positive",
+          "scenario": "练习陶艺",
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "unknown"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          25
+        ]
+      },
+      "confidence": 0.0,
+      "reviewMode": "single",
+      "sensitivity": "standard",
+      "evidenceRefs": [
+        {
+          "span": {
+            "end": 657,
+            "start": 614
+          },
+          "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+          "sourceVersion": 1
+        }
+      ],
+      "proposalHash": "929eb687dfe3325a056deedd8190fad818314a0b40d87dea290358859450ebde",
+      "candidateKind": "experience",
+      "schemaVersion": "owner-truth-candidate-proposal-v1",
+      "epistemicStatus": "recalled",
+      "perspectiveType": "firstPerson",
+      "contentSchemaVersion": "owner-truth-v5"
+    },
+    "topic_id": "4c26e7cd-94db-588e-b0d9-6ffa4a11961c"
+  },
+  {
+    "id": "97f526de-3048-5aeb-87a2-2a32f5b82d55",
+    "decision_status": "pending",
+    "payload": {
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "我练习陶艺时会把手机放远一点，这样更容易专心。",
+        "affect": null,
+        "facets": {
+          "time": [],
+          "goals": [],
+          "habits": [
+            {
+              "value": "练习陶艺时把手机放远一点",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                41
+              ]
+            }
+          ],
+          "people": [],
+          "places": [],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": null,
+        "summary": "我练习陶艺时会把手机放远一点，这样更容易专心。",
+        "factType": "habit",
+        "semantic": {
+          "title": "我练习陶艺时会把手机放远一点，这样更容易专心",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "entities": [],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "我练习陶艺时会把手机放远一点，这样更容易专心。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "does",
+        "statement": "我练习陶艺时会把手机放远一点，这样更容易专心。",
+        "dimensions": [
+          "lifeEvents",
+          "knowledgeSkills",
+          "habits"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": null,
+          "polarity": "positive",
+          "scenario": "练习陶艺时",
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "unknown"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          41
+        ]
+      },
+      "confidence": 0.0,
+      "reviewMode": "single",
+      "sensitivity": "standard",
+      "evidenceRefs": [
+        {
+          "span": {
+            "end": 1054,
+            "start": 1011
+          },
+          "sourceId": "db36b800-bd34-575b-ae87-4400c3bf06eb",
+          "sourceVersion": 1
+        }
+      ],
+      "proposalHash": "9e17557567166c33444cc0aaeb9d45876d90ce0d030c7f821b253f8ef893f92d",
+      "candidateKind": "experience",
+      "schemaVersion": "owner-truth-candidate-proposal-v1",
+      "epistemicStatus": "recalled",
+      "perspectiveType": "firstPerson",
+      "contentSchemaVersion": "owner-truth-v5"
+    },
+    "topic_id": "6934f587-9154-54e4-bea4-ad719e7f4c4b"
+  }
+]
