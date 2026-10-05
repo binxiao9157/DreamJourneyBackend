@@ -577,6 +577,10 @@ from app.services.owner_truth_legacy_shadow_parity import (
     legacy_shadow_parity_summary,
 )
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
+from app.services.echo_public_context import TIME_ZONE_HEADER, clock_context, is_explicit_public_query
+from app.services.echo_public_search import (
+    LIVE_SEARCH_RULE, PublicSearchResult, PublicSearchService, live_search_configured, public_query, public_search_question,
+)
 from app.services.formal_memory_conversation_snapshot import (
     FormalMemoryConversationSnapshotError,
     FormalMemoryConversationSnapshotService,
@@ -17563,8 +17567,8 @@ def _build_authorized_echo_context_packet(
 
 
 _REALTIME_LIVE_SYSTEM_ROLE = """
-你是寻梦环游的 AI 回响，不是真人本人。只能使用 formalMemorySnapshot 中的已确认正式记忆回答事实问题。
-回答可以自然、温柔、口语化，但不得新增、替换、推断或美化事实；没有依据时明确说不知道。
+你是寻梦环游的 AI 回响，不是真人本人。公共常识可以正常回答。私人历史事实使用 formalMemorySnapshot 中的已确认正式记忆；用户本轮明确提供的信息可用于当前回应，不视为已确认记忆。
+回答可以自然、温柔、口语化，但不得新增、替换、推断或美化私人事实；私人事实没有依据时明确说不知道。
 当前身份为家人时，可以用第一人称转述目标人物的已确认记忆，但仍必须说明自己是 AI，不是真人本人。
 对话保持连续，允许用户打断；助手的推测和回应不能写入正式记忆。
 """.strip()
@@ -17671,10 +17675,11 @@ def _build_authorized_realtime_live_session(
         )
         snapshot = bind_provider_role_text(
             snapshot,
-            system_role=_REALTIME_LIVE_SYSTEM_ROLE,
+            system_role=_REALTIME_LIVE_SYSTEM_ROLE + (LIVE_SEARCH_RULE if live_search_configured(settings) else ""),
             speaking_style=_REALTIME_LIVE_SPEAKING_STYLE,
             max_chars=settings.realtime_voice_snapshot_max_chars,
             max_bytes=settings.realtime_voice_system_role_max_bytes,
+            clock_context=clock_context(request.headers.get(TIME_ZONE_HEADER, "UTC"), live=True),
         )
     except FormalMemoryConversationSnapshotError as exc:
         status_code = 503 if exc.code in {
@@ -17845,8 +17850,11 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         else payload.get("personaScope")
     )
     persona_scope = str(raw_persona_scope or "personal").strip().lower()
+    search_question = public_search_question(query, recent_turns) if settings.echo_public_search_enabled else query
+    search_plan = public_query(search_question) if settings.echo_public_search_enabled else None
+    explicit_public_search = search_plan is not None and search_plan.kind in {"weather", "places"}
     requires_authorized_memory = (
-        persona_scope == "family"
+        (persona_scope == "family" and not is_explicit_public_query(query) and not explicit_public_search)
         or DeepSeekEchoAnswerProxy.requires_authorized_personal_memory(query)
     )
     context_authority = packet.get("contextAuthority") if isinstance(packet, dict) else None
@@ -17866,6 +17874,26 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         else ""
     ).strip() or "ownerTruthRetrievalUnavailable"
 
+    public_information = PublicSearchResult("notRequested")
+    if (provider_effects_allowed and not owner_truth_retrieval_fallback
+            and not requires_authorized_memory and settings.echo_public_search_enabled):
+        # Authorized route only; never pass memory or recent turns into search.
+        search_started_at = time.monotonic()
+        public_information = PublicSearchService(settings).lookup(search_question)
+        if public_information.queried_at:
+            _record_provider_cost_attempt(
+                request, provider="volcengine", capability="echoPublicSearch",
+                unit_type="request", units=1,
+                state="succeeded" if public_information.status in {"available", "noResults"} else "failed",
+                reason="publicSearch" + public_information.status[0].upper() + public_information.status[1:],
+                started_at=search_started_at,
+            )
+            logger.info(
+                "echoPublicSearch status=%s queryHash=%s queriedAt=%s sourceCount=%s requestId=%s",
+                public_information.status, public_information.query_hash,
+                public_information.queried_at, len(public_information.sources), public_information.request_id,
+            )
+
     if provider_effects_allowed and owner_truth_retrieval_fallback:
         answer_text = "记忆检索服务暂时无法检索已确认的正式记忆，请稍后重试。"
         provider = "owner-truth-grounding-policy"
@@ -17881,6 +17909,14 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         )
         provider = "owner-truth-grounding-policy"
         fallback_reason = "ownerTruthQueryNoMatch"
+    elif provider_effects_allowed and public_information.status in {"locationRequired", "unavailable", "noResults"}:
+        answer_text = (
+            "请告诉我想查询的城市或具体地标，我再帮你查天气或附近店铺。"
+            if public_information.status == "locationRequired"
+            else "暂时查不到可靠的实时信息，请稍后再试。"
+        )
+        provider = "public-information-policy"
+        fallback_reason = "publicSearch" + public_information.status[0].upper() + public_information.status[1:]
     elif provider_effects_allowed:
         generation = packet.get("generationContext") or {}
         persona = packet.get("persona") or {}
@@ -17894,6 +17930,8 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 persona_name=str(payload.get("personaName") or ""),
                 recent_turns=recent_turns,
                 requires_authorized_memory=requires_authorized_memory,
+                time_zone=request.headers.get(TIME_ZONE_HEADER, "UTC"),
+                public_information=public_information,
             )
             _record_provider_cost_attempt(
                 request,
@@ -17920,6 +17958,8 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                     recent_turns=recent_turns,
                     requires_authorized_memory=False,
                     open_domain_repair=True,
+                    time_zone=request.headers.get(TIME_ZONE_HEADER, "UTC"),
+                    public_information=public_information,
                 )
                 _record_provider_cost_attempt(
                     request,
@@ -18099,6 +18139,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                     "handoff": memory_handoff,
                 },
                 "conversationContext": conversation_context_summary,
+                "publicInformation": public_information.public_metadata(),
             },
         },
         headers={"Cache-Control": "no-store"},

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from typing import Optional
 
@@ -371,6 +371,10 @@ class Settings:
     realtime_voice_long_live_max_session_bytes: int = 1024 * 1024 * 1024
     realtime_voice_snapshot_max_chars: int = 32_768
     realtime_voice_system_role_max_bytes: int = 8_192
+    # Independently gated; no key is exposed to mobile or role text.
+    echo_public_search_enabled: bool = False
+    realtime_voice_websearch_enabled: bool = False
+    volcengine_websearch_api_key: Optional[str] = field(default=None, repr=False)
     volcengine_voice_clone_api_key: Optional[str] = None
     volcengine_voice_clone_train_url: str = "https://openspeech.bytedance.com/api/v3/tts/voice_clone"
     volcengine_voice_clone_query_url: str = "https://openspeech.bytedance.com/api/v3/tts/get_voice"
@@ -1115,6 +1119,9 @@ class Settings:
             volcengine_realtime_resource_id=_env("VOLCENGINE_REALTIME_RESOURCE_ID", cls.volcengine_realtime_resource_id) or cls.volcengine_realtime_resource_id,
             volcengine_realtime_address=_env("VOLCENGINE_REALTIME_ADDRESS", cls.volcengine_realtime_address) or cls.volcengine_realtime_address,
             volcengine_realtime_uri=_env("VOLCENGINE_REALTIME_URI", cls.volcengine_realtime_uri) or cls.volcengine_realtime_uri,
+            echo_public_search_enabled=_env_bool("ECHO_PUBLIC_SEARCH_ENABLED", False),
+            realtime_voice_websearch_enabled=_env_bool("REALTIME_VOICE_WEBSEARCH_ENABLED", False),
+            volcengine_websearch_api_key=_env("VOLCENGINE_WEBSEARCH_API_KEY"),
             realtime_voice_proxy_enabled=_env_bool(
                 "REALTIME_VOICE_PROXY_ENABLED",
                 cls.realtime_voice_proxy_enabled,

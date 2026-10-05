@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 from app.core.config import Settings
+from app.services.realtime_voice_search import RealtimeSearchFrames
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
 from app.services.owner_truth_memory_projection import OwnerTruthMemoryProjectionService
 
@@ -496,7 +497,7 @@ class RealtimeVoiceSessionBroker:
             async with upstream_context as upstream:
                 tasks = {
                     asyncio.create_task(
-                        self._client_to_upstream(client, upstream, traffic_budget)
+                        self._client_to_upstream(client, upstream, traffic_budget, lease=lease)
                     ),
                     asyncio.create_task(
                         self._upstream_to_client(upstream, client, traffic_budget)
@@ -523,15 +524,25 @@ class RealtimeVoiceSessionBroker:
         client: Any,
         upstream: Any,
         traffic_budget: _RealtimeVoiceTrafficBudget,
+        *,
+        lease: Optional[Dict[str, Any]] = None,
     ) -> None:
+        search_frames = RealtimeSearchFrames(self.settings, lease)
         while True:
             message = await client.receive()
             message_type = str(message.get("type") or "")
             if message_type == "websocket.disconnect":
                 return
             if message.get("bytes") is not None:
-                traffic_budget.consume(message["bytes"])
-                await upstream.send(message["bytes"])
+                original = message["bytes"]
+                traffic_budget.consume(original)
+                forwarded = search_frames.transform(original)
+                # Charge additional serialized bytes without charging original twice.
+                if len(forwarded) > traffic_budget.max_frame_bytes:
+                    raise RealtimeVoiceTrafficLimitExceeded("realtime voice frame limit exceeded")
+                if len(forwarded) > len(original):
+                    traffic_budget.consume(b"x" * (len(forwarded) - len(original)))
+                await upstream.send(forwarded)
             elif message.get("text") is not None:
                 traffic_budget.consume(message["text"])
                 await upstream.send(message["text"])

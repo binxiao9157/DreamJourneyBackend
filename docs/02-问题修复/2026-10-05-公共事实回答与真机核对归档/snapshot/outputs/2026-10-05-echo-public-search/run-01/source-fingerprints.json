@@ -1,0 +1,15 @@
+{
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/.env.example": "2096057e69964ebee19116bf14101c21749a0e944a11401ae95af3375e925c47",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/core/config.py": "f821e9301fa27220037dab6ac3b8d5d9c0b6d54250bff5cfa844b9e3e6c2e7d8",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/main.py": "8b43498248aa177a937970998a2376f7ac2d70761c572c945d52e263cd22afb1",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/services/deepseek.py": "fd9ea0e71e2f855188cbea75e6470ce6389a86b4e36c895dbebc4e52596c588f",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/services/echo_public_context.py": "84f2126a36434581c5bb6aaa576f12e903ab07164065b97cd0e881c45af0f2a2",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/services/echo_public_search.py": "7b0e42e96fb7e34aadd8be7ecffcc82170ca575cbbb177bc4e6107715218bc83",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/services/realtime_voice_search.py": "5fd483eaad7c0d6f6808190659b31c5abd8b3717b343593c54f1580165dccfb1",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/services/realtime_voice_proxy.py": "931b661ec3fd00d456b4330cf450baa98f9c6a76c21e4ed87adb95d2cff0871d",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/services/formal_memory_conversation_snapshot.py": "4d9906b30809ecfe059fcfb600d059f9d9bf6a7e7b3e64b3250126539c754259",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_echo_public_search.py": "61ba4aa80f49932239797d5e927464ab48e822ba51760bfb211be403c9dd1944",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_echo_public_context.py": "90f1d7c726c8bf22b4031c2b7ca6423d7e9c85860d6d390cdd80b56fb11afd8d",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourney/Sources/Services/DreamJourneyBackendClient.swift": "931de5f1a90fe981ce4793fa9498c87b3595d16bceb114136e88a347006fce6f",
+  "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourneyTests/OwnerTruthContractsTests.swift": "d0fcf45e28851a58e75f15e1cfa155b3a4066dc83777e91d5143159775be5298"
+}

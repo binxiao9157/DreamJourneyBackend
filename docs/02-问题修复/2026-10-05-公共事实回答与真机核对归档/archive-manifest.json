@@ -1,0 +1,38 @@
+[
+  {
+    "path": "snapshot/02-问题修复/DreamJourney问题登记册.md",
+    "sha256": "b2420f4591f55973cdad563511927aed1463f5f9572d3553b865bed67ee47ac7"
+  },
+  {
+    "path": "snapshot/02-问题修复/Live语音与开麦/2026-10-04-公共事实回答与实时查询/实施与验证.md",
+    "sha256": "e9b8e6d2954d7d6bb0dd11e98454adc8a05cfb515ecb739b0eda6a51cf60355b"
+  },
+  {
+    "path": "snapshot/02-问题修复/Live语音与开麦/2026-10-04-公共事实回答与实时查询/第二步实施与验证.md",
+    "sha256": "3f8622916740647332cdfdfa6cedd0a6d753f618f93921777ec23d798124797e"
+  },
+  {
+    "path": "snapshot/02-问题修复/Live语音与开麦/2026-10-04-公共事实回答与实时查询/第二步部署与真机验证.md",
+    "sha256": "b34b953564a18eb38eccf7cf4b72a0e6f745ef91bb7534e04aef96f11df8fa78"
+  },
+  {
+    "path": "snapshot/02-问题修复/Live语音与开麦/2026-10-04-公共事实回答与实时查询/设计与分步验收.md",
+    "sha256": "6105d1ffc599d068e5eb18eac0d0420253b3ae2d4ac16f40a2fe3265e48566f0"
+  },
+  {
+    "path": "snapshot/02-问题修复/Live语音与开麦/2026-10-04-公共事实回答与实时查询/部署与安装.md",
+    "sha256": "290bc9f749fc439b39b88bdf192e64606d841f4370c3e62b8d7440a97a0169d1"
+  },
+  {
+    "path": "snapshot/02-问题修复/记忆系统/2026-10-05-同场重复事实误判时间变化/本场继续确认记录.md",
+    "sha256": "5b145049668160250a8dc70e67a8497c41d04a08f3087debc9f55994f391abfd"
+  },
+  {
+    "path": "snapshot/02-问题修复/记忆系统/2026-10-05-同场重复事实误判时间变化/问题分析与剩余主题核对.md",
+    "sha256": "11b64a6fd3d2bef010422ccb6888be4a5f9cde6f495201446703a9f59c9bbc2d"
+  },
+  {
+    "path": "snapshot/outputs/2026-10-05-echo-public-search/run-01/source-fingerprints.json",
+    "sha256": "eddaa83fdff5f64b962184bc74de532f1efffbef0f2d0e98d4546030968e7d77"
+  }
+]
