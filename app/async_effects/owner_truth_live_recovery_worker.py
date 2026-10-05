@@ -516,8 +516,9 @@ class RecoveryThemeAssembler:
             if atom['atomId'] in hints:atom['privateDraftGroups']=hints[atom['atomId']]
         themes,omitted,blocked=self.organize_pages(lease=lease,run_id=run_id,
             revision=metadata['snapshotRevision'],source_id=source.source_id,catalog=catalog)
-        blocked=tuple(blocked)+tuple(relation_failure)
-        if (failed or omitted or blocked) and themes:
+        # Relationship review quality is not a count of unpublished facts.
+        # It still requires the same independent full-context safety gate.
+        if (failed or omitted or blocked or relation_failure) and themes:
             # Include all received owner text, not just the failed page; this
             # preserves enough adjacent context for pronouns/corrections.
             themes,guard_blocked=self.guard_partial_themes(lease=lease,run_id=run_id,
@@ -525,6 +526,8 @@ class RecoveryThemeAssembler:
                 themes=themes,turns=metadata['conversationTurns'])
             omitted=tuple(sorted(set(omitted)|{a for b in guard_blocked for a in b['atomIds']}))
             blocked=tuple(blocked)+tuple(guard_blocked)
+            for diagnostic in relation_failure:
+                diagnostic['safetyReview']='blocked' if guard_blocked else 'passed'
             if not themes:raise contract_failure('themeValidate','noReliableThemes',category='domain')
         themes,relations,relation_blocked,unchanged,corrections=self.relate_themes(lease=lease,intent=intent,
             source=source,run_id=run_id,themes=themes,catalog=catalog)
@@ -540,7 +543,7 @@ class RecoveryThemeAssembler:
             from dataclasses import replace
             command=replace(command,proposals=tuple(replace(p,correction_of_memory_version_id=corrections.get(str(a['id'])))
                 for a,p in zip(selected,command.proposals)))
-        manifest=dict(relationScreens=list(getattr(self,'relation_screens',[])),deferredRelations=list(getattr(self,'deferred_relations',[])),privateDraftRefs=draft_refs,factResolution=resolution,unchangedRelations=list(unchanged),schemaVersion='live-recovery-publication-v1',snapshotId=metadata['snapshotId'],
+        manifest=dict(relationDiagnostics=relation_failure,relationScreens=list(getattr(self,'relation_screens',[])),deferredRelations=list(getattr(self,'deferred_relations',[])),privateDraftRefs=draft_refs,factResolution=resolution,unchangedRelations=list(unchanged),schemaVersion='live-recovery-publication-v1',snapshotId=metadata['snapshotId'],
             snapshotHash=metadata['snapshotHash'],sourceId=source.source_id,sourceHash=source.source_content_hash,
             receivedRanges=metadata['receivedRanges'],missingRanges=metadata['missingRanges'],
             endPositionKnown=metadata['endPositionKnown'],omittedAtomIds=list(omitted),blockedThemes=list(blocked),

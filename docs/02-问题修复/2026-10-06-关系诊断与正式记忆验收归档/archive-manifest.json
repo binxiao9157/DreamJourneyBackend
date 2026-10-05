@@ -1,0 +1,22 @@
+{
+  "snapshot/02-问题修复/DreamJourney问题登记册.md": {
+    "sourceSHA256": "5c0a9fcbd8281a76422dabc4781e93ea3976dfb0443a5c3d3be845bb10e31e4c",
+    "archivedSHA256": "27c52476f50775fc30bedfef97de9d7b0da3e9eb88a0b0d0fac61960b69c10d0"
+  },
+  "snapshot/02-问题修复/记忆系统/2026-10-05-关系审核降级误报内容遗漏/修复设计.md": {
+    "sourceSHA256": "cb23c9dc525a2753adc6d9a1204814629cf5a265ced574549a5f64bc23b17ca5",
+    "archivedSHA256": "cb23c9dc525a2753adc6d9a1204814629cf5a265ced574549a5f64bc23b17ca5"
+  },
+  "snapshot/02-问题修复/记忆系统/2026-10-05-关系审核降级误报内容遗漏/实施与验证.md": {
+    "sourceSHA256": "675fa5b663dca2cbe9a0a60aa6815ddae8ba47925f3d05947f75b285f6396bb8",
+    "archivedSHA256": "675fa5b663dca2cbe9a0a60aa6815ddae8ba47925f3d05947f75b285f6396bb8"
+  },
+  "snapshot/02-问题修复/记忆系统/2026-10-05-关系审核降级误报内容遗漏/部署与真机验证.md": {
+    "sourceSHA256": "7688fbccf02ae69061f529b3df23e77604c43bfb814a47c0820c93ab03e8b69a",
+    "archivedSHA256": "7688fbccf02ae69061f529b3df23e77604c43bfb814a47c0820c93ab03e8b69a"
+  },
+  "snapshot/02-问题修复/记忆系统/2026-10-06-合并事实遗漏上课时间/现场记录与初步分析.md": {
+    "sourceSHA256": "c34044fb760ea5db071c0e52633066527ab9cf8cfcccd9b5ca6cd1592c81ebf2",
+    "archivedSHA256": "c34044fb760ea5db071c0e52633066527ab9cf8cfcccd9b5ca6cd1592c81ebf2"
+  }
+}

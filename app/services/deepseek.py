@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -1520,10 +1520,17 @@ class DeepSeekLiveMemoryOrganizationProxy:
             )
             review.update(self._response_observation(response, stage="relationDecode"))
             return review
-        except (TypeError, ValueError) as error:
-            raise contract_failure(
-                "relationValidate", "schemaInvalid", eligible=True
-            ) from error
+        except LiveMemoryContractFailure as error:
+            observation = self._response_observation(response, stage="relationDecode")
+            # Value-free diagnostics: never persist the provider body or raw
+            # parser exception. The hash identifies this rejected response.
+            raise replace(error, provider_observation={
+                "stage": error.stage, "reason": error.reason,
+                "validationVersion": "relation-batch-v3",
+                "responseHash": sha256(content.encode("utf-8")).hexdigest(),
+                "finishReason": observation.get("_providerFinishReason"),
+                "usage": observation.get("_providerUsage"),
+            }) from None
 
     def build_relation_batch_request(
         self,
@@ -1629,21 +1636,27 @@ class DeepSeekLiveMemoryOrganizationProxy:
 {intra_rule}
 
 只输出：{{"results":[{{"incomingIndex":0,"scannedExistingCount":{len(existing)},"decisions":[]}}]}}。
-每个 incomingIndex 必须且只能出现一次，scannedExistingCount 必须等于本页既有事实数。
+incomingIndex、existingIndex、scannedExistingCount 都必须是 JSON 整数，不得用字符串、布尔或小数。
+每个 incomingIndex（0至{len(incoming)-1}）必须且只能出现一次，scannedExistingCount 必须等于{len(existing)}。
 decisions 只列非 distinct 关系；每项含 existingIndex 与 relation。relation 只能是 duplicate、supplement、correction、retraction、unresolved。
 每个新事实至多一个非 distinct 目标；整个响应 decisions 不得超过64条。
-supplement 必须额外返回 resolvedMemory，结构与输入 memory 完全相同并引用全部相关 user sourceTurnIndices。
+非 supplement 决策只能含 existingIndex 和 relation，必须省略 resolvedMemory，不能填 null 或空对象。
+非空决策形状示例：{{"existingIndex":0,"relation":"duplicate"}}；这只是格式，实际关系必须依据证据。
+supplement 必须额外返回 resolvedMemory：memoryKind 为 experience/knowledge/emotion，对应非空主字段 summary/claim/label；
+sourceTurnIndices 必须是本次提供的 user 轮整数索引，包含全部相关证据；facets 必须含0至1的数值 confidence，
+其余维度使用输入已有数组结构，非空项保留 value、evidenceMode、confidence、sourceTurnIndices，不生成无依据标签。
+若使用 evidenceFragmentIds，只能引用本次公开证据目录中的ID；不复制或编造 _atomIds、_sourceEvidenceRanges 等内部字段。
+保留有依据的其他业务字段，禁止改写主体、凭空补充或把不确定当成可合并。
 相似词、共同实体或时间相近都不能单独证明关系；无法确定必须 unresolved。不要输出解释。"""
 
     @classmethod
     def parse_relation_batch_review(
-        cls,
-        content: str,
-        *,
-        turns: List[Dict[str, Any]],
-        incoming_count: int,
-        existing_count: int,
+        cls, content: str, *, turns: List[Dict[str, Any]],
+        incoming_count: int, existing_count: int,
     ) -> Dict[str, Any]:
+        def reject(reason: str):
+            raise contract_failure("relationValidate", reason, eligible=True)
+
         cleaned = content.replace("```json", "").replace("```", "").strip()
         parsed = DeepSeekImageAnalysisProxy._loads_json(cleaned)
         if parsed is None:
@@ -1651,70 +1664,63 @@ supplement 必须额外返回 resolvedMemory，结构与输入 memory 完全相�
             parsed = DeepSeekImageAnalysisProxy._loads_json(extracted) if extracted else None
         results = parsed.get("results") if isinstance(parsed, Mapping) else None
         if not isinstance(results, list) or len(results) != incoming_count:
-            raise ValueError("Live memory relation batch coverage is invalid")
+            reject("batchCoverageInvalid")
         allowed = {"duplicate", "supplement", "correction", "retraction", "unresolved"}
         seen_incoming: set[int] = set()
         total_decisions = 0
         normalized: List[Dict[str, Any]] = []
         for result in results:
             if not isinstance(result, Mapping):
-                raise ValueError("Live memory relation batch result is invalid")
+                reject("batchReceiptInvalid")
             incoming_index = result.get("incomingIndex")
             scanned_count = result.get("scannedExistingCount")
             decisions = result.get("decisions")
-            if (
-                isinstance(incoming_index, bool)
-                or not isinstance(incoming_index, int)
-                or not 0 <= incoming_index < incoming_count
-                or incoming_index in seen_incoming
-                or isinstance(scanned_count, bool)
-                or scanned_count != existing_count
-                or not isinstance(decisions, list)
-            ):
-                raise ValueError("Live memory relation batch result is invalid")
-            seen_existing: set[int] = set()
+            if (type(incoming_index) is not int or not 0 <= incoming_index < incoming_count
+                or incoming_index in seen_incoming or type(scanned_count) is not int
+                or scanned_count != existing_count or not isinstance(decisions, list)):
+                reject("batchReceiptInvalid")
+            if len(decisions) > 1:
+                reject("batchAmbiguousTargets")
             normalized_decisions: List[Dict[str, Any]] = []
             for decision in decisions:
                 if not isinstance(decision, Mapping):
-                    raise ValueError("Live memory relation batch decision is invalid")
+                    reject("batchDecisionInvalid")
                 existing_index = decision.get("existingIndex")
                 relation = decision.get("relation")
-                if (
-                    isinstance(existing_index, bool)
-                    or not isinstance(existing_index, int)
-                    or not 0 <= existing_index < existing_count
-                    or existing_index in seen_existing
-                    or relation not in allowed
-                ):
-                    raise ValueError("Live memory relation batch decision is invalid")
-                item: Dict[str, Any] = {
-                    "existingIndex": existing_index,
-                    "relation": relation,
-                }
+                if type(existing_index) is not int or not 0 <= existing_index < existing_count:
+                    reject("batchTargetInvalid")
+                if not isinstance(relation, str) or relation not in allowed:
+                    reject("batchRelationInvalid")
+                item: Dict[str, Any] = {"existingIndex": existing_index, "relation": relation}
                 if relation == "supplement":
                     resolved = decision.get("resolvedMemory")
                     if not isinstance(resolved, Mapping):
-                        raise ValueError("Live memory supplement misses resolved memory")
-                    validated = cls.parse_organization(
-                        json.dumps({"memories": [resolved]}, ensure_ascii=False),
-                        turns=turns,
-                    )["memories"]
+                        reject("resolvedMemoryMissing")
+                    try:
+                        validated = cls.parse_organization(
+                            json.dumps({"memories": [resolved]}, ensure_ascii=False), turns=turns,
+                        )["memories"]
+                    except (TypeError, ValueError) as error:
+                        # Only fixed category labels leave this boundary; do not
+                        # place arbitrary exception text or model values in logs.
+                        message = str(error)
+                        reason = ("supplementEvidenceInvalid" if "evidence" in message
+                                  else "supplementFacetsInvalid" if "facet" in message
+                                  else "supplementMemoryInvalid")
+                        raise contract_failure("relationValidate", reason, eligible=True) from None
+                    if len(validated) != 1:
+                        reject("supplementMemoryInvalid")
                     item["resolvedMemory"] = validated[0]
                 elif "resolvedMemory" in decision:
-                    raise ValueError("resolved memory is only valid for supplement")
-                seen_existing.add(existing_index)
+                    reject("unexpectedResolvedMemory")
                 normalized_decisions.append(item)
             total_decisions += len(normalized_decisions)
-            if len(normalized_decisions) > 1 or total_decisions > 64:
-                raise ValueError("Live memory relation batch is ambiguous or saturated")
+            if total_decisions > 64:
+                reject("pageSaturated")
             seen_incoming.add(incoming_index)
-            normalized.append(
-                {
-                    "incomingIndex": incoming_index,
-                    "scannedExistingCount": existing_count,
-                    "decisions": normalized_decisions,
-                }
-            )
+            normalized.append({"incomingIndex": incoming_index,
+                               "scannedExistingCount": existing_count,
+                               "decisions": normalized_decisions})
         return {"results": sorted(normalized, key=lambda item: item["incomingIndex"])}
 
     @classmethod

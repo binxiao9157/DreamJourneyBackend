@@ -3080,12 +3080,13 @@ class ModelAssistedOwnerTruthLiveConversationExtractor:
                 reservation,
                 exposure_state=self._provider_failure_exposure(error),
                 model=str(getattr(self._relation_reviewer, "model", "unknown")),
-                finish_reason=None,
+                finish_reason=(getattr(error, "provider_observation", None) or {}).get("finishReason"),
                 usage={"_diagnostic": {"stage": getattr(error, "stage", "relationRequest"),
-                    "reason": getattr(error, "reason", "unclassified"), "validationVersion": "relation-batch-v2",
-                    "inputHash": plan.input_hash, "httpStatus": getattr(error, "provider_status", None)}},
+                    "reason": getattr(error, "reason", "unclassified"), "validationVersion": "relation-batch-v3",
+                    "inputHash": plan.input_hash, "httpStatus": getattr(error, "provider_status", None),
+                    "provider": getattr(error, "provider_observation", None)}},
                 response_hash=(sha256(json.dumps(review, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-                               if review is not None else None),
+                               if review is not None else (getattr(error, "provider_observation", None) or {}).get("responseHash")),
             )
             if isinstance(error, LiveMemoryContractFailure):
                 retryable = error.transport_retryable or error.contract_retry_eligible
