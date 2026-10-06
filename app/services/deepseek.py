@@ -1009,7 +1009,7 @@ class DeepSeekLiveMemoryOrganizationProxy:
 
     model = "deepseek-v4-flash"
     prompt_version = "owner-truth-live-memory-organization-v5"
-    support_prompt_version = "owner-truth-live-memory-support-v1"
+    support_prompt_version = "owner-truth-live-memory-support-v2"
     relation_prompt_version = "owner-truth-live-memory-relation-v1"
     maximum_turn_count = 200
     maximum_turn_characters = 4_000
@@ -1920,7 +1920,9 @@ supplement 仅用于同一事实的互补信息，并必须额外返回 resolved
 {{"schemaVersion":"{LIVE_MEMORY_SUPPORT_SCHEMA_VERSION}","turnAssessments":[{{"turnIndex":1,"speechAct":"assertion"}}],"memoryAssessments":[{{"memoryIndex":0,"verdict":"supported","supportingTurnIndices":[1]}}],"omittedFactBearingTurnIndices":[]{atom_scope_example}}}
 
 规则：
-1. turnAssessments 只能包含 role=user 的 turn，不得包含 role=assistant；每个 role=user 的 turn 必须且只能出现一次；speechAct 只能是 assertion、correction、timeSupplement、query、quotedSpeech、ambiguous。
+1. turnAssessments 只能包含 role=user 的 turn，不得包含 role=assistant；每个 role=user 的 turn 必须且只能出现一次；speechAct 只能是 assertion、correction、timeSupplement、query、quotedSpeech、ambiguous、conversationControl。
+1a. conversationControl 仅用于不包含任何可记忆个人事实的纯寒暄、礼貌感谢、告别、结束会话意图或孤立应答，例如“你好”“谢谢，我没有其他内容了”“先聊到这里”。这些不是记忆事实，不需要草案，不得列入 omittedFactBearingTurnIndices，也不能作为 supported 的证据。
+1b. 必须判断整轮语义：一句中即使有“谢谢/再见”，只要同时自述经历、感受、观点、偏好、时间、纠正或撤回，就仍用 assertion/correction/timeSupplement，并保留这些事实。例：“谢谢，更正一下，我改为每周五练习，今天很开心”是 correction，不是 conversationControl。不要把真实感受或事实当礼貌用语丢掉。
 2. 每条草案必须且只能出现一次；verdict 只能是 supported、unsupported、superseded、uncertain。
 3. supported 必须列出直接支持命题的 user turn，且只能来自草案已有 sourceTurnIndices；其他 verdict 的 supportingTurnIndices 必须为空。
 4. 纯查询、确认问法、反问和当场“用户问过什么”的转述不能支持事实草案。问号不是唯一判断依据。

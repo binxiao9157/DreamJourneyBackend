@@ -267,6 +267,37 @@ class PostgresLiveTopicRepository:
                     if cur.fetchone() is None:raise LiveThemeConflict('themeFormalTargetChanged')
             return current
 
+    def prepare_primary_edits(self, *, revision, edits):
+        """Read bound Candidate kinds inside the caller's visible-revision UoW.
+
+        Do not require pending here: confirmation receipt replay must keep the
+        same command after members become terminal. Review still owns CAS.
+        """
+        from app.domain.owner_truth.contracts import MemoryKind
+        from app.domain.owner_truth.ontology import primary_memory_edit_payload
+        if not edits:
+            return {}
+        if not set(edits) <= set(revision['members']):
+            raise LiveThemeConflict('invalidThemeEdits')
+        ids = [revision['members'][atom]['candidateId'] for atom in edits]
+        with self._cursor() as cur:
+            cur.execute("SELECT id,payload FROM owner_truth.memory_candidates WHERE id=ANY(%s::uuid[])", (ids,))
+            candidates = {str(row['id']): row['payload'] for row in cur.fetchall()}
+        result = {}
+        for atom, text in edits.items():
+            binding = revision['members'][atom]
+            candidate = candidates.get(binding['candidateId'])
+            if candidate is None or candidate.get('proposalHash') != binding['proposalHash']:
+                raise LiveThemeConflict('themeCandidateBindingMismatch')
+            try:
+                kind = MemoryKind(candidate['candidateKind'])
+            except (KeyError, TypeError, ValueError):
+                raise LiveThemeConflict('themeCandidateKindInvalid') from None
+            result[atom] = primary_memory_edit_payload(
+                kind=kind, source_payload=candidate['content'], text=text,
+            )
+        return result
+
     def record_decision(self,*,context,topic_id,expected_version,expected_hash,state):
         if state not in {'accepted','rejected'}:raise LiveThemeConflict('invalidThemeDecision')
         current=self.lock_visible_revision(context=context,topic_id=topic_id,

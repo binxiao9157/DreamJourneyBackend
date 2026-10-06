@@ -1,0 +1,32 @@
+[
+  {
+    "path": "snapshot/02-问题修复/DreamJourney问题登记册.md",
+    "sourceSHA256": "af907bbb10b6e0f84fef24a7ac5bb4c4c9d172ed7638ee2c15bca9bd4636dd8e",
+    "archivedSHA256": "a938dbb285cf397618261606d5609b8f22ba1ea5171f021e8a2a79cd2065f2b2"
+  },
+  {
+    "path": "snapshot/02-问题修复/记忆系统/2026-10-06-文字回响候选生成与主题编辑/修复设计.md",
+    "sourceSHA256": "7c419b46130ba59f8f78e950a7940de7b2f0560016d24b1e63e66fe0d4b6f06d",
+    "archivedSHA256": "7c419b46130ba59f8f78e950a7940de7b2f0560016d24b1e63e66fe0d4b6f06d"
+  },
+  {
+    "path": "snapshot/02-问题修复/记忆系统/2026-10-06-文字回响候选生成与主题编辑/实施与验证.md",
+    "sourceSHA256": "d58d9d8abb01bdf309dafed7f681858ec79ea1d42f715d601454e0a1898af298",
+    "archivedSHA256": "d58d9d8abb01bdf309dafed7f681858ec79ea1d42f715d601454e0a1898af298"
+  },
+  {
+    "path": "snapshot/02-问题修复/记忆系统/2026-10-06-文字回响候选生成与主题编辑/部署与真机验证.md",
+    "sourceSHA256": "d13b596794fa02bdbcdf2793e35bb9bf4115634ee79c1cd1637e4e75b5c9c479",
+    "archivedSHA256": "d13b596794fa02bdbcdf2793e35bb9bf4115634ee79c1cd1637e4e75b5c9c479"
+  },
+  {
+    "path": "snapshot/02-问题修复/记忆系统/2026-10-06-文字回响候选生成与主题编辑/长场同组补证只读核实.md",
+    "sourceSHA256": "a0b11a8a814382d3984613e13758e3ca1a571ea9964e1c7376c5beaf0b8ec936",
+    "archivedSHA256": "a0b11a8a814382d3984613e13758e3ca1a571ea9964e1c7376c5beaf0b8ec936"
+  },
+  {
+    "path": "snapshot/02-问题修复/记忆系统/2026-10-06-文字回响候选生成与主题编辑/长场正式确认续测.md",
+    "sourceSHA256": "c1ad6ce3186d7f83303f9a32ec5e922d36e39396b1c4b2db8e83655dde7c9f7c",
+    "archivedSHA256": "c1ad6ce3186d7f83303f9a32ec5e922d36e39396b1c4b2db8e83655dde7c9f7c"
+  }
+]

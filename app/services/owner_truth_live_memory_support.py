@@ -15,7 +15,7 @@ from app.services.owner_truth_live_memory_contract_errors import contract_failur
 
 
 LIVE_MEMORY_SUPPORT_SCHEMA_VERSION = "owner-truth-live-memory-support-v1"
-LIVE_MEMORY_SUPPORT_VALIDATOR_VERSION = "live-memory-support-validator-v1"
+LIVE_MEMORY_SUPPORT_VALIDATOR_VERSION = "live-memory-support-validator-v2"
 
 _SPEECH_ACTS = frozenset(
     {
@@ -25,6 +25,7 @@ _SPEECH_ACTS = frozenset(
         "query",
         "quotedSpeech",
         "ambiguous",
+        "conversationControl",
     }
 )
 _FACT_BEARING_ACTS = frozenset({"assertion", "correction", "timeSupplement"})

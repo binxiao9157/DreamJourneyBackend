@@ -858,6 +858,26 @@ def _owner_correction_emotion_label(statement: str) -> str:
     return "未明确"
 
 
+def primary_memory_edit_payload(
+    *, kind: MemoryKind, source_payload: Mapping[str, Any], text: str,
+) -> dict[str, Any]:
+    """Translate a primary-only theme edit without retaining stale fact fields."""
+    field = {
+        MemoryKind.EXPERIENCE: "event",
+        MemoryKind.KNOWLEDGE: "statement",
+        MemoryKind.EMOTION: "expression",
+    }[kind]
+    source = canonicalize_memory_payload(
+        kind=kind, payload=source_payload, schema_version=OWNER_TRUTH_SCHEMA_VERSION_V5,
+    )
+    replacement = text.strip()
+    if replacement == _primary_text(kind=kind, payload=source):
+        # The existing correction contract expects a complete value for no-op
+        # edits. Keep it stable for preview, confirm, and receipt replay.
+        return dict(source)
+    return {field: replacement}
+
+
 def reextract_owner_corrected_memory_payload(
     *,
     kind: MemoryKind,

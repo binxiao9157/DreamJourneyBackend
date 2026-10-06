@@ -10791,16 +10791,17 @@ def _live_theme_group_command(request, vault_id, topic_id, payload, *, confirmat
     with store.request_unit_of_work(correlation_id="live-theme-bind",command_id="live-theme-bind"):
         current=store.owner_truth_live_topic_repository().lock_visible_revision(context=context,
             topic_id=topic_id,expected_version=binding['version'],expected_hash=binding['proposalHash'],allow_terminal=confirmation)
-    action=payload.get('action','accept')
-    if action not in {'accept','reject'}:raise LiveThemeConflict('unsupportedThemeAction')
-    edits=payload.get('primaryEdits',{})
-    if (not isinstance(edits,dict) or not set(edits)<=set(current['members'])
-        or (action=='reject' and edits) or any(not isinstance(v,str) or not 1<=len(v.strip())<=4000 for v in edits.values())):
-        raise LiveThemeConflict('invalidThemeEdits')
+        action=payload.get('action','accept')
+        if action not in {'accept','reject'}:raise LiveThemeConflict('unsupportedThemeAction')
+        edits=payload.get('primaryEdits',{})
+        if (not isinstance(edits,dict) or not set(edits)<=set(current['members'])
+            or (action=='reject' and edits) or any(not isinstance(v,str) or not 1<=len(v.strip())<=4000 for v in edits.values())):
+            raise LiveThemeConflict('invalidThemeEdits')
+        corrected_values=store.owner_truth_live_topic_repository().prepare_primary_edits(revision=current,edits=edits)
     command=OwnerTruthMemoryChangeSetGroupCommand(command_id=payload.get('commandId',''),
         selections=tuple(OwnerTruthMemoryChangeSetGroupSelection(candidate_id=item['candidateId'],
             expected_candidate_version=1,action=CandidateReviewAction('correct' if atom in edits else action),
-            corrected_value={'statement':edits[atom].strip()} if atom in edits else None,
+            corrected_value=corrected_values.get(atom),
             corrected_value_schema_version='owner-truth-v5' if atom in edits else None,
             reason_code='ownerCorrectedTheme' if atom in edits else 'ownerConfirmedTheme' if action=='accept' else 'ownerRejectedTheme')
             for atom,item in sorted(current['members'].items())),dependencies=(),theme_binding=binding,

@@ -1,0 +1,15 @@
+{
+  "backendHead": "4515404034821d900926d2e758dbc41ee1dc2b47",
+  "iosHead": "c18b4572cb80ea8c23910bad7c7d04be8a24951e",
+  "iosDirty": "",
+  "files": {
+    "app/domain/owner_truth/ontology.py": "79b1afdf9bdf234ed350d361438ee835136a1897536445b7875880357841dfb0",
+    "app/main.py": "a3faa9d25f216fdde2c80c4f0bb3c3611099a7d03c0bc05c406caab7f239f0e5",
+    "app/services/deepseek.py": "fa5cb3fd534cdbbf95a4b880f3984634490d74f35f2ec48df0fe6068a83edfef",
+    "app/services/owner_truth_live_memory_support.py": "a70d974d4717d2d0837a7f1909f7446daca61ee2f69519fc7cf649bb486e24dc",
+    "app/services/owner_truth_live_topics.py": "2581aaf3654d15ad559da76276b995529848e76849a29c8258f705aca6d90fc6",
+    "tests/test_typed_echo_repair.py": "2c729e2339bf0f62a5e9c97441ec1e45660a4cbf81aacc71ea17d33515072dda",
+    "scripts/backend-typed-echo-postgres-smoke.py": "bed684b33a5d1649c2627ab24b320badbe832fb44c66720b6eb5c406b8bfb02e"
+  },
+  "productFingerprint": "0fd2eff540d041fdd1c7edd32b553f67edd03cedcaa073da968a06a5588e3299"
+}
