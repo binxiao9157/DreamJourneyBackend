@@ -1,0 +1,24 @@
+{
+  "tool": "a8b214dd25cc8d7cb1d7c122a26db3649ff54e6549f71cb6a4c6e935575afdef",
+  "stage": {
+    "schema": 2,
+    "source": "b8eb4ff9d803e6d4c6f79c92b11145e1cd67b0f95a5b6ea6e84d535a6a4f37ac",
+    "tool": "a8b214dd25cc8d7cb1d7c122a26db3649ff54e6549f71cb6a4c6e935575afdef",
+    "stagedSource": "f479532570e059f3c48783ac3c96eb4fa57002370bc8bfac6dae103be3446a68",
+    "repository": "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev"
+  },
+  "changedFiles": {
+    "ios/LabEvidence.swift": "ec76493ce166a9a13ddb0838dfccaf3945d161fc33ae8175792647c2046a056a",
+    "ios/LiveDeviceLabRuntime.swift": "002a9ad9a8d58c7b9738224b3910bae222c8326348f4036cd85be6099877e14a",
+    "ios/LocalRecoveryIntegrationTests.swift": "516ffb3165b058ad9f611972c31f1bc60b91d408b2670731431657f50ba627c6",
+    "lab.py": "8ee3990ef6f6beb5f3bb8ecde7abe4d6850eb40e372630e5905f68b1a7155e5e",
+    "stage.py": "192b348b00a979023c56f240f93609fb6e3c76033bff17c04d884add94f73e5f",
+    "test_asr_review.py": "26cf4ef83b979adc58c44c61081f5f23569c4b3b94b213098b1796076dbc0d0b",
+    "README.md": "ba3382a0b0678de26a8825fb05fb16f4b364b75fec88c692da8ff9102162521c"
+  },
+  "build": "generic iOS unsigned PASS",
+  "pythonTests": "34 PASS",
+  "device": "NOT_RUN",
+  "realProvider": "NOT_RUN",
+  "isolatedPGIntegration": "NOT_RUN"
+}

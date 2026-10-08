@@ -118,7 +118,6 @@ final class LiveDeviceLabRuntime {
     private var asrFinals: [(text: String, questionID: String?)] = []
     private var acceptedASRByTurn: [String] = [] // Legacy proof only; never recovery authority.
     private var evidenceLedger = LiveLabEvidenceLedger()
-    private var lastMismatchDurableCheck: String?
     private var bindingRequest: [String: Any]?
     private var confirmationCommandsSent = 0
     private var confirmationOutcomes: [String] = []
@@ -365,9 +364,14 @@ final class LiveDeviceLabRuntime {
                 try await confirmAndReadMemory(m, echo: echo)
                 report["conversationStatus"] = "PASS"
                 report["recoveryStatus"] = "PASS"
-                report["memoryConfirmationStatus"] = "PASS"
-                report["status"] = "PASS"
-                try publish("formalReadback")
+                if report["memoryConfirmationStatus"] as? String == "REVIEW_REQUIRED" {
+                    report["status"] = "CONTENT_REVIEW_REQUIRED"
+                    try publish("contentReviewRequired")
+                } else {
+                    report["memoryConfirmationStatus"] = "PASS"
+                    report["status"] = "PASS"
+                    try publish("formalReadback")
+                }
             }
         } catch {
             await handleFailure(error)
@@ -503,7 +507,9 @@ final class LiveDeviceLabRuntime {
                     } else if let echo {
                         do {
                             try await confirmAndReadMemory(m, echo: echo, recovering: true)
-                            report["memoryConfirmationStatus"] = "PASS"
+                            if report["memoryConfirmationStatus"] as? String != "REVIEW_REQUIRED" {
+                                report["memoryConfirmationStatus"] = "PASS"
+                            }
                         } catch {
                             report["memoryConfirmationStatus"] = confirmationFailureStatus
                             report["confirmationPreparation"] = "FAIL"
@@ -641,30 +647,26 @@ final class LiveDeviceLabRuntime {
             try publish("awaitingRealAnswer")
             try await wait("ASR_answer_TTS_listening", seconds: m.turnTimeoutSeconds) {
                 let text = self.asrFinals.dropFirst(priorASR).last?.text ?? ""
-                let matched = turn.requiredASRTerms.allSatisfy { Self.normalized(text).contains(Self.normalized($0)) }
                 let playbackClosed = self.nonSilentPCMBytes > priorPCM && self.actualPlaybackCompletions > priorPlayback
-                if playbackClosed, !matched, let capture = self.capture {
-                    // Only classify a stable final already sealed by the product; a provisional
-                    // final observation must not short circuit later legitimate revisions.
-                    let observed = self.evidenceLedger.observations.filter { $0.ordinal == turn.ordinal }
-                    let checkKey = LiveLabMessage.hash(text) + ":" + String(capture.labSnapshot["serverConfirmedCount"] as? Int ?? -1)
-                    if !observed.isEmpty && self.lastMismatchDurableCheck != checkKey {
-                        self.lastMismatchDurableCheck = checkKey
-                        let durable = try capture.labDurableMessages()
-                        if self.evidenceLedger.stableMismatch(text: text, ordinal: turn.ordinal, messages: durable) {
-                            throw LiveDeviceLabError.check("asrFactMismatch")
-                        }
-                    }
-                }
-                return matched && playbackClosed
-                    && turn.requiredASRTerms.allSatisfy { Self.normalized(self.displayedUserText).contains(Self.normalized($0)) }
-                    && !self.displayedAssistantText.isEmpty
-                    && (echo.labIsListening || (m.profile == "10m" && echo.labFarewellStarted))
+                return LiveLabTurnCompletion.ready(finalText: text,
+                    displayedUser: self.displayedUserText, displayedAssistant: self.displayedAssistantText,
+                    playbackClosed: playbackClosed,
+                    listeningOrFarewell: echo.labIsListening || (m.profile == "10m" && echo.labFarewellStarted))
             }
             let finals = asrFinals.dropFirst(priorASR)
             // Keep the final observation of a Provider question; don't count successive final revisions twice.
             let acceptedText = finals.last?.text ?? ""
             acceptedASRByTurn.append(acceptedText)
+            let missingTerms = LiveLabTurnCompletion.missingTerms(text: acceptedText, terms: turn.requiredASRTerms)
+            if !missingTerms.isEmpty {
+                var differences = report["asrDifferences"] as? [[String: Any]] ?? []
+                differences.append(["ordinal": turn.ordinal, "actualTranscript": acceptedText,
+                    "transcriptSHA256": LiveLabMessage.hash(acceptedText), "pcmSHA256": turn.sha256,
+                    "requiredTerms": turn.requiredASRTerms, "missingTerms": missingTerms])
+                report["asrDifferences"] = differences
+                report["contentReviewStatus"] = "PENDING_FINAL_DURABLE_CHECK"
+                try Self.write(["runID": runID, "differences": differences], to: root.appendingPathComponent("asr-differences.json"))
+            }
             var proofs = report["turnProofs"] as? [[String: Any]] ?? []
             proofs.append(["ordinal": turn.ordinal, "pcmSHA256": turn.sha256,
                            "asrSHA256": Self.sha(Data(finals.map(\.text).joined(separator: " ").utf8)),
@@ -675,7 +677,7 @@ final class LiveDeviceLabRuntime {
                            "userDisplaySHA256": Self.sha(Data(displayedUserText.utf8)),
                            "assistantDisplaySHA256": Self.sha(Data(displayedAssistantText.utf8)),
                            "captureAfterTurn": capture?.labSnapshot ?? [:],
-                           "requiredASRTermsPassed": true])
+                           "requiredASRTermsPassed": missingTerms.isEmpty, "missingASRTerms": missingTerms])
             report["turnProofs"] = proofs
             completedTurns += 1
             try publish("turnCompleted")
@@ -799,7 +801,7 @@ final class LiveDeviceLabRuntime {
             ["canonicalID": fact.canonicalID, "ordinal": fact.ordinal, "sha256": LiveLabMessage.hash(fact.text),
              "observed": true, "durable": true, "sourceIncluded": true, "asrCorrect": !fact.requiredTerms.isEmpty && fact.requiredTerms.allSatisfy { Self.normalized(fact.text).contains(Self.normalized($0)) }] as [String: Any]
         }
-        let expectedTerms = try evidenceLedger.requiredFacts(durable)
+        let contentDifferences = try evidenceLedger.contentDifferences(durable)
         let sourceID = OwnerTruthRecordID(rawValue: sid); self.sourceID = sourceID
         let source: OwnerTruthSourceRecordDetail = try await request {
             self.client.fetchOwnerTruthSourceRecord(vaultID: vault, sourceID: sourceID, completion: $0)
@@ -822,7 +824,6 @@ final class LiveDeviceLabRuntime {
         let candidates = Set(all.flatMap(\.members).map(\.candidateID))
         guard candidates.count <= m.maxCandidateWrites else { throw LiveDeviceLabError.check("candidateWriteBudget") }
         let content = Self.normalized(all.flatMap(\.members).map(\.statement).joined(separator: " "))
-        guard !expectedTerms.isEmpty, expectedTerms.allSatisfy({ content.contains(Self.normalized($0)) }) else { throw LiveDeviceLabError.check("themeMissingExpectedFacts") }
         guard let nav = echo.navigationController else { throw LiveDeviceLabError.check("noNavigationController") }
         let inbox = OwnerTruthCandidateInboxViewController(accountLease: lease, client: client,
             accountLeaseRuntime: accountRuntime, qaGateEnabled: inboxPolicy, sourceIDFilter: sourceID)
@@ -832,6 +833,25 @@ final class LiveDeviceLabRuntime {
         report["sourceID"] = raw; report["sourceSHA256"] = Self.sha(Data(source.text.utf8))
         report["candidateIDs"] = candidates.map { $0.rawValue.uuidString.lowercased() }
         report["candidateCount"] = candidates.count; report["themeCount"] = all.count
+        report["candidatePublicationStatus"] = "PASS"
+        report["candidateContentStatus"] = contentDifferences.isEmpty ? "CHECKING" : "REVIEW_REQUIRED"
+        report["finalASRDifferences"] = contentDifferences
+        if !contentDifferences.isEmpty {
+            report["contentReviewStatus"] = "REQUIRED"
+            report["confirmationPreparation"] = "CONTENT_REVIEW_REQUIRED"
+            report["memoryConfirmationStatus"] = "REVIEW_REQUIRED"
+            try Self.write(["runID": runID, "accountHash": accountHash,
+                "sourceID": raw, "sourceSHA256": report["sourceSHA256"] ?? "",
+                "candidateIDs": report["candidateIDs"] ?? [], "differences": contentDifferences,
+                "themes": all.map { theme in ["topicID": String(describing: theme.binding.topicId),
+                    "statements": theme.members.map(\.statement)] as [String: Any] }],
+                to: root.appendingPathComponent("content-review-required.json"))
+            return
+        }
+        let expectedTerms = try evidenceLedger.requiredFacts(durable)
+        guard expectedTerms.allSatisfy({ content.contains(Self.normalized($0)) }) else { throw LiveDeviceLabError.check("themeMissingExpectedFacts") }
+        report["candidateContentStatus"] = "PASS"
+        report["contentReviewStatus"] = "NOT_REQUIRED"
         report["confirmationPreparation"] = "PASS"
         try publish("confirmingCurrentThemes")
         for theme in all {

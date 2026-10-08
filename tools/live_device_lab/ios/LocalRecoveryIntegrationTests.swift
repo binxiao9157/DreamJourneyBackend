@@ -281,9 +281,16 @@
             XCTAssertEqual(result["stopOrigin"] as? String, "testPublicStop")
             XCTAssertEqual(result["completedTurns"] as? Int, 0)
             if !negative.isEmpty {
-                XCTAssertEqual(result["memoryConfirmationStatus"] as? String, "NOT_RUN")
+                XCTAssertEqual(result["memoryConfirmationStatus"] as? String, negative == "asrMismatch" ? "REVIEW_REQUIRED" : "NOT_RUN")
                 XCTAssertEqual(result["confirmationCommandsObserved"] as? Int ?? 0, 0)
-                XCTAssertEqual(result["memoryConfirmationFailure"] as? String, negative == "asrMismatch" ? "asrFactMismatch" : "bindingHash")
+                if negative == "asrMismatch" {
+                    XCTAssertNil(result["memoryConfirmationFailure"])
+                    XCTAssertEqual(result["candidatePublicationStatus"] as? String, "PASS")
+                    XCTAssertEqual(result["confirmationPreparation"] as? String, "CONTENT_REVIEW_REQUIRED")
+                    XCTAssertFalse((result["finalASRDifferences"] as? [[String: Any]] ?? []).isEmpty)
+                } else {
+                    XCTAssertEqual(result["memoryConfirmationFailure"] as? String, "bindingHash")
+                }
                 XCTAssertEqual(result["failure"] as? String, "nativePCMUnavailableOnSimulator")
                 _ = try cap15ControlRequest(baseURL: baseURL, path: "/__lab/assert-no-confirm", method: "POST", payload: [:], expectedStatusCode: 200)
                 print("LOCAL_NEGATIVE=\(negative) PASS no confirmation POST")

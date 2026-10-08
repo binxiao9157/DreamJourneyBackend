@@ -90,7 +90,7 @@ class BindingTests(unittest.TestCase):
                  reader=lambda q:dict(q,status='ERROR',code='bindingHash',readOnly=True),copier=lambda p:None)
             self.assertEqual(r['code'],'bindingHash')
     def test_old_host_same_durable_assertion_is_red(self):
-        old=Path(__file__).resolve().parents[2]/'outputs/2026-09-30-live-lab-recovery-repair/run-01/baseline/live_device_lab/recovery_binding.py'
+        old=Path(__file__).resolve().parent/'fixtures/recovery_binding_before_20260930.py'
         spec=importlib.util.spec_from_file_location('old_binding',old);mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
         q=fixture()[0];value=dict(q,capture=dict(recoverySessionID=q['sessionID'],productSessionID=q['productSessionID']),completedTurns=0)
         # The remote fixture applies the old server assertion to the SAME actual count (2).

@@ -1,0 +1,42 @@
+test_actual_swift_turn_and_final_durable_policy (test_asr_review.ASRReviewTests) ... ok
+test_host_returns_review_terminal_without_waiting_for_timeout (test_asr_review.ASRReviewTests) ... {"stage": null, "status": "CONTENT_REVIEW_REQUIRED", "completedTurns": null, "failure": null}
+ok
+test_review_pending_never_confirms_via_readback_or_issues_short_receipt (test_asr_review.ASRReviewTests) ... ok
+test_duplicate_source_and_local_id (test_binding.BindingTests) ... ok
+test_exact_identity_not_only_count (test_binding.BindingTests) ... ok
+test_host_runtime_build_and_safe_error (test_binding.BindingTests) ... ok
+test_old_host_same_durable_assertion_is_red (test_binding.BindingTests) ... ok
+test_partial_refused_not_promoted (test_binding.BindingTests) ... ok
+test_recopy_after_transfer_failure_and_new_revision (test_binding.BindingTests) ... ok
+test_request_types_fail_closed (test_binding.BindingTests) ... ok
+test_snapshot_membership_and_hash (test_binding.BindingTests) ... ok
+test_zero_completed_two_saved_and_odd_count (test_binding.BindingTests) ... ok
+test_completed_scope_never_requires_unsent_rounds (test_conversation_cases.ConversationCaseTests) ... ok
+test_deterministic_and_varied_scenarios (test_conversation_cases.ConversationCaseTests) ... ok
+test_natural_content_not_looped_and_terms_exist (test_conversation_cases.ConversationCaseTests) ... ok
+test_semantics_is_separate_and_targets_exist (test_conversation_cases.ConversationCaseTests) ... ok
+test_actual_swift_observation_policy_has_fixed_timeout_and_partial_states (test_lab.SafetyTests) ... ok
+test_ambiguous_source_hook_rejected (test_lab.SafetyTests) ... ok
+test_audio_tamper_rejected (test_lab.SafetyTests) ... ok
+test_bundle_external_code_link_rejected (test_lab.SafetyTests) ... ok
+test_current_device_short_required (test_lab.SafetyTests) ... ok
+test_legacy_launcher_only_identity_cannot_be_reused (test_lab.SafetyTests) ... ok
+test_long_profile_cannot_be_compressed (test_lab.SafetyTests) ... ok
+test_missing_short_gate_stops_before_any_device_operation (test_lab.SafetyTests) ... ok
+test_modified_tool_or_staged_code_invalidates_build (test_lab.SafetyTests) ... ok
+test_no_shell_execution_or_direct_backend (test_lab.SafetyTests) ... ok
+test_no_silent_speech_pass (test_lab.SafetyTests) ... ok
+test_path_traversal_rejected (test_lab.SafetyTests) ... ok
+test_real_code_and_configuration_tamper_rejected_with_same_launcher (test_lab.SafetyTests) ... ok
+test_recovery_observation_does_not_end_at_first_error_or_erase_it (test_lab.SafetyTests) ... {"stage": null, "status": "RECOVERING", "completedTurns": null, "failure": "frameGap"}
+ok
+test_stale_report_not_accepted (test_lab.SafetyTests) ... {"stage": "failed", "status": "FAIL", "completedTurns": null, "failure": null}
+ok
+test_symlink_rejected (test_lab.SafetyTests) ... ok
+test_valid_manifest (test_lab.SafetyTests) ... ok
+test_wrong_rate_rejected (test_lab.SafetyTests) ... ok
+
+----------------------------------------------------------------------
+Ran 34 tests in 0.470s
+
+OK

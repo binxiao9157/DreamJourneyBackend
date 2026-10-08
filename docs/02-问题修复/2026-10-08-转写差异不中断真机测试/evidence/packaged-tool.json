@@ -1,0 +1,6 @@
+{
+  "tool": "13b6712c64e5001c5303447fe8389d6ca4914f2a4099b8b342cfa83a6e34ba95",
+  "regression": "34 PASS",
+  "device": "NOT_RUN",
+  "note": "Runtime unchanged after unsigned build; added portable baseline fixture; rebuild stage required."
+}

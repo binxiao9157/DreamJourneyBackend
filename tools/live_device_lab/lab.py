@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 import wave
+from conversation_cases import natural_case, semantic_case, expected_for_completed
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_IOS = Path('/Users/gaominge/Documents/Codex/Video/DreamJourney_dev')
@@ -119,19 +120,26 @@ def prepare(root, profile, voice):
     digits = ''.join('零一二三四五六七八九'[int(c, 16) % 10] for c in nonce[:6])
     marker = '星桥' + digits
     short = [
-        (f'这次我新布置了另一个独立的读书角，和之前聊过的读书角不是同一处，也不是旧场所改名。这个新读书角叫{marker}，名字的星是星星的星，桥是桥梁的桥。我每周六上午在那里读书。请简短回应。', [marker, '周六']),
-        (f'补充一下，这次新建的{marker}读书角里摆着一张蓝色木桌，我最喜欢在那里读旅行故事。请简短回应。', ['蓝色', '旅行']),
+        (f'这次我新布置了另一个独立的摄影器材柜，和之前聊过的摄影器材柜不是同一处，也不是旧场所改名。这个新摄影器材柜叫{marker}，名字的星是星星的星，桥是桥梁的桥。我每周六上午在那里整理装备。请简短回应。', [marker, '周六']),
+        (f'补充一下，这次新建的{marker}摄影器材柜里摆着一张绿色收纳箱，我最喜欢在那里检查摄影清单。请简短回应。', ['绿色', '摄影']),
     ]
     count, minimum, maximum = {'short': (2, 0, 300), '10m': (32, 600, 900), '20m': (110, 1200, 3600), '40m': (220, 2400, 7200)}[profile]
     scripts = list(short)
     activities = [('画画', '绿色'), ('写日记', '橙色'), ('做手工', '紫色'), ('听音乐', '白色')]
     for i in range(2, count):
         activity, color = activities[(i - 2) % len(activities)]
-        text = f'关于这次新建的{marker}读书角，我再说一点。我也喜欢在那里{activity}，旁边有{color}的书签。请用一句话回应。'
+        text = f'关于这次新建的{marker}摄影器材柜，我再说一点。我也喜欢在那里{activity}，旁边有{color}的书签。请用一句话回应。'
         scripts.append((text, [activity, color]))
     if count > 2 and profile != '10m':
-        scripts[-1] = (f'最后补充这次新建的{marker}读书角的情况。那张蓝色木桌是我自己做的，我很珍惜它。请简短回应。', ['蓝色', '自己做'])
-    required_memory = [marker, '周六', '蓝色', '旅行'] + (['自己做'] if count > 2 and profile != '10m' else [])
+        scripts[-1] = (f'最后补充这次新建的{marker}摄影器材柜的情况。那张绿色收纳箱是我自己做的，我很珍惜它。请简短回应。', ['绿色', '自己做'])
+    required_memory = [marker, '周六', '绿色', '摄影'] + (['自己做'] if count > 2 and profile != '10m' else [])
+    case = natural_case(profile, nonce) if profile in ('short', '10m') else None
+    if case:
+        marker = case['marker']
+        scripts = [(t['text'], t['requiredASRTerms']) for t in case['turns']]
+        required_memory = case['requiredMemoryTerms']
+        save(root / 'conversation-case.json', case)
+        save(root / 'semantic-special-cases.json', semantic_case(nonce))
     m = dict(schema=1, runID=run_id, profile=profile, marker=marker,
              sampleRate=16000, channels=1, sampleBytes=2,
              minimumDurationSeconds=minimum, maximumDurationSeconds=maximum,
@@ -258,7 +266,7 @@ def wait_result(device, remote, local, limit, expected_mode, expected_launch):
             if value.get('stage') == 'awaitingSourceBinding':
                 from recovery_binding import approve_scene_source
                 approve_scene_source(device, remote, Path(local).parent, value)
-            if value.get('status') in ('PASS', 'FAIL'):
+            if value.get('status') in ('PASS', 'FAIL', 'CONTENT_REVIEW_REQUIRED'):
                 return value
         except __import__('binding_contract').BindingError as error:
             save(Path(local).parent/'binding-host-error.json', {'code': error.code, 'readOnly': True})
@@ -316,11 +324,24 @@ def run(args):
     save(p/'launched.json', {'runID': m['runID'], 'at': time.time()})
     launch_id = launch('run')
     result = wait_result(args.device, remote, p/'result.json', m['maximumDurationSeconds'] + m['organizationTimeoutSeconds'] + 240, 'run', launch_id)
+    # Copy content-review artifacts without changing the business outcome on an export error.
+    for field, name in [('asrDifferences', 'asr-differences.json'),
+                        ('finalASRDifferences', 'content-review-required.json')]:
+        if result.get(field):
+            try:
+                copy_from(args.device, remote + '/' + name, p/name)
+            except (subprocess.SubprocessError, OSError) as error:
+                save(p/(name + '.export-error.json'), {'category': type(error).__name__, 'readOnly': True})
     if result['status'] == 'FAIL' and result.get('liveStarted'):
         try:
             copy_from(args.device, remote + '/diagnostic-events.json', p/'diagnostic-events.json')
         except (subprocess.SubprocessError, OSError):
             pass
+    case_path = p/'conversation-case.json'
+    if case_path.exists():
+        completed = result.get('completedTurns')
+        if isinstance(completed, int):
+            save(p/'completed-fact-checklist.json', expected_for_completed(json.loads(case_path.read_text()), completed))
     original_result = result
     if result['status'] == 'PASS' or result.get('memoryConfirmationStatus') == 'PASS':
         launch_id = launch('readback')
@@ -335,9 +356,14 @@ def run(args):
         if m['profile'] == 'short' and result['status'] == 'PASS':
             save(p/'short-receipt.json', dict(status='PASS', profile='short', identity=identity,
                  device=args.device, accountHash=result.get('accountHash'), createdAt=time.time(), consumed=False))
+    if result.get('status') == 'CONTENT_REVIEW_REQUIRED':
+        raise ContentReviewRequired('conversation and candidate publication checked; review ASR differences before confirmation; no short receipt issued')
     if result.get('status') != 'PASS':
         raise ValueError('real device test failed; evidence retained; long test must not start')
 
+
+class ContentReviewRequired(ValueError):
+    pass
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -355,6 +381,9 @@ def main():
 
 if __name__ == '__main__':
     try: main()
+    except ContentReviewRequired as e:
+        print("CONTENT_REVIEW_REQUIRED: " + str(e), file=sys.stderr)
+        sys.exit(2)
     except (ValueError, OSError, subprocess.SubprocessError, TimeoutError) as e:
         print('STOP: ' + str(e), file=sys.stderr)
         sys.exit(1)

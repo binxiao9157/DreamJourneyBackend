@@ -50,12 +50,18 @@ struct LiveLabEvidenceLedger {
             return first
         }
     }
-    func stableMismatch(text: String, ordinal: Int, messages: [LiveLabMessage]) -> Bool {
-        let observed = observations.filter { $0.ordinal == ordinal && $0.text == text }
-        return messages.contains { row in row.role == "owner" && observed.contains { fact in
-            fact.canonicalID == row.canonicalID && fact.text == row.text &&
-                !fact.requiredTerms.allSatisfy { LiveLabMessage.normalized(text).contains(LiveLabMessage.normalized($0)) }
-        } }
+    // Content differences are review evidence, not a reason to terminate audio input.
+    func contentDifferences(_ messages: [LiveLabMessage]) throws -> [[String: Any]] {
+        let facts = try resolved(messages)
+        guard !facts.isEmpty else { throw LiveDeviceLabError.check("noObservedOwnerFacts") }
+        return try facts.compactMap { fact in
+            guard !fact.requiredTerms.isEmpty else { throw LiveDeviceLabError.check("missingExpectedTerms") }
+            let missing = LiveLabTurnCompletion.missingTerms(text: fact.text, terms: fact.requiredTerms)
+            guard !missing.isEmpty else { return nil }
+            return ["ordinal": fact.ordinal, "canonicalID": fact.canonicalID,
+                    "actualTranscript": fact.text, "sha256": LiveLabMessage.hash(fact.text),
+                    "requiredTerms": fact.requiredTerms, "missingTerms": missing]
+        }
     }
     func requiredFacts(_ messages: [LiveLabMessage]) throws -> [String] {
         let facts = try resolved(messages)
@@ -67,6 +73,19 @@ struct LiveLabEvidenceLedger {
             }
         }
         return Array(Set(facts.flatMap(\.requiredTerms))).sorted()
+    }
+}
+
+enum LiveLabTurnCompletion {
+    static func missingTerms(text: String, terms: [String]) -> [String] {
+        terms.filter { !LiveLabMessage.normalized(text).contains(LiveLabMessage.normalized($0)) }
+    }
+    static func ready(finalText: String, displayedUser: String, displayedAssistant: String,
+                      playbackClosed: Bool, listeningOrFarewell: Bool) -> Bool {
+        let final = LiveLabMessage.normalized(finalText)
+        return !final.isEmpty && LiveLabMessage.normalized(displayedUser) == final
+            && !displayedAssistant.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && playbackClosed && listeningOrFarewell
     }
 }
 

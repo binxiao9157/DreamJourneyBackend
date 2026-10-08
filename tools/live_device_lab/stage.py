@@ -58,9 +58,11 @@ def stage_workspace(repo, dest):
         '        )')
     text = replace_once(text, audio_callback,
         GUARD + '\n        engine.setBoolParam(LiveDeviceLabRuntime.streamRequested || audiblePlaybackPolicy.decoderObservationEnabled, forKey: SE_PARAMS_KEY_DIALOG_ENABLE_DECODER_AUDIO_CALLBACK_BOOL)\n#else\n' + audio_callback + '\n#endif')
-    text = replace_once(text, '        case SEDecoderAudioData:\n',
+    decoder_anchor = '        case SEDecoderAudioData:\n            if isProviderOwnedLive, config.enablePlayer {'
+    text = replace_once(text, decoder_anchor,
         '        case SEDecoderAudioData:\n' + GUARD +
-        '\n            Task { @MainActor in LiveDeviceLabRuntime.active?.observePCM(data) }\n#endif\n')
+        '\n            Task { @MainActor in LiveDeviceLabRuntime.active?.observePCM(data) }\n#endif\n'
+        '            if isProviderOwnedLive, config.enablePlayer {')
     text = replace_once(text, '            DDLogInfo("[DialogEngine] 播放器播放完毕")',
         GUARD + '\n            Task { @MainActor in LiveDeviceLabRuntime.active?.observePlaybackFinished() }\n#endif\n            DDLogInfo("[DialogEngine] 播放器播放完毕")')
     text = replace_once(text, '        case SEEngineError:\n            let msg = parseErrorMessage(from: data)',
