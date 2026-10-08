@@ -502,6 +502,11 @@ def _is_same_source_repetition(
             continue
         if _semantic_value_is_unspecified(proposed):
             continue
+        # Same-source identical wording can carry an omitted polarity on one
+        # extraction. Preserve the reviewed target; only union evidence.
+        # Known opposition and every other qualifier still use normal review.
+        if field == "polarity" and {proposed, previous} == {"unknown", "positive"}:
+            continue
         if field == "scenario":
             # Only an optional Chinese temporal suffix, never general fuzzy
             # matching (e.g. home and work must remain distinct scopes).
@@ -521,6 +526,30 @@ def _is_same_source_repetition(
         result["statement"] = _visible_text(content.get("statement"))
         return result
     return business_content(candidate_content) == business_content(target_content)
+
+
+def _reviewable_business_changes(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Describe a conservative dispute without treating evidence as content.
+
+    Keep actual before/after values in the proposal. Derived retrieval indexes
+    and evidence coordinates do not describe a change in the owner's claim.
+    """
+    ignored = {"provenance", "sourceTurnIndices", "semantic", "facets", "dimensions"}
+    fields: list[str] = []
+    for key in sorted(set(before) | set(after)):
+        if key in ignored or before.get(key) == after.get(key):
+            continue
+        if key == "qualifiers":
+            old, new = _qualifiers(before), _qualifiers(after)
+            fields.extend(
+                "qualifiers." + name for name in sorted(set(old) | set(new))
+                if old.get(name) != new.get(name)
+            )
+        else:
+            fields.append(key)
+    return tuple(fields)
 
 
 def _explicit_correction(candidate: OwnerTruthCandidateSnapshot) -> str | None:
@@ -1134,6 +1163,7 @@ def build_memory_changeset(
                     candidate_content=candidate_content,
                     target=target,
                     reason="sameAssertionCannotSafelyMerge",
+                    changed_fields=_reviewable_business_changes(target_content, candidate_content),
                     added_evidence_count=len(new_evidence),
                 )
 

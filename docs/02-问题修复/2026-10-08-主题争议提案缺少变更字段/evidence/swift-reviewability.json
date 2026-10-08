@@ -1,0 +1,192 @@
+{
+  "deviceRun" : false,
+  "groupWouldBeReviewable" : true,
+  "mode" : "macOS offline execution of unmodified Swift domain declarations",
+  "operations" : [
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 0,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 1,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 2,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 3,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 4,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+        "evidenceRefs"
+      ],
+      "kind" : "addEvidence",
+      "memberIndex" : 5,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 6,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 7,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+        "evidenceRefs"
+      ],
+      "kind" : "addEvidence",
+      "memberIndex" : 8,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 9,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 10,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 11,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 12,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+        "evidenceRefs"
+      ],
+      "kind" : "addEvidence",
+      "memberIndex" : 13,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 14,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 15,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 16,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 17,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 18,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 19,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+
+      ],
+      "kind" : "add",
+      "memberIndex" : 20,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+        "qualifiers"
+      ],
+      "kind" : "temporalChange",
+      "memberIndex" : 21,
+      "reviewable" : true
+    },
+    {
+      "changedFields" : [
+        "evidenceRefs"
+      ],
+      "kind" : "addEvidence",
+      "memberIndex" : 22,
+      "reviewable" : true
+    }
+  ],
+  "productModified" : true
+}

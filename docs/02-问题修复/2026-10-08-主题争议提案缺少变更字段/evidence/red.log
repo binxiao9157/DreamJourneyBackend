@@ -1,0 +1,61 @@
+test_23_members_preview_commit_and_replay (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... FAIL
+test_fallback_all_polarities_have_actual_diffs (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... FAIL
+test_fallback_includes_other_business_changes (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... FAIL
+test_known_opposition_stays_dispute (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_new_exception_does_not_cross_boundaries (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_real_pair_both_orders_add_evidence_and_preserve_target (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... FAIL
+test_same_evidence_is_duplicate (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... FAIL
+
+======================================================================
+FAIL: test_23_members_preview_commit_and_replay (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_owner_truth_same_source_polarity.py", line 72, in test_23_members_preview_commit_and_replay
+    self.assertEqual(p.members[8].proposal.change_set.operation.kind.value,'addEvidence')
+AssertionError: 'dispute' != 'addEvidence'
+- dispute
++ addEvidence
+
+
+======================================================================
+FAIL: test_fallback_all_polarities_have_actual_diffs (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_owner_truth_same_source_polarity.py", line 55, in test_fallback_all_polarities_have_actual_diffs
+    dif=o['factDiff']['changedFields'];self.assertTrue(dif,(old,new))
+AssertionError: [] is not true : ('unknown', 'positive')
+
+======================================================================
+FAIL: test_fallback_includes_other_business_changes (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_owner_truth_same_source_polarity.py", line 62, in test_fallback_includes_other_business_changes
+    self.assertIn('summary',o['changedFields']);self.assertIn('qualifiers.polarity',o['changedFields'])
+AssertionError: 'summary' not found in []
+
+======================================================================
+FAIL: test_real_pair_both_orders_add_evidence_and_preserve_target (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_owner_truth_same_source_polarity.py", line 40, in test_real_pair_both_orders_add_evidence_and_preserve_target
+    self.assertEqual(o['operationKind'],'addEvidence')
+AssertionError: 'dispute' != 'addEvidence'
+- dispute
++ addEvidence
+
+
+======================================================================
+FAIL: test_same_evidence_is_duplicate (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_owner_truth_same_source_polarity.py", line 45, in test_same_evidence_is_duplicate
+    self.assertEqual(preview(c,t)['operationKind'],'duplicate')
+AssertionError: 'dispute' != 'duplicate'
+- dispute
++ duplicate
+
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.050s
+
+FAILED (failures=5)

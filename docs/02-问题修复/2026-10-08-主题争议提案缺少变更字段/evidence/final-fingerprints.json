@@ -1,0 +1,32 @@
+{
+  "repositories": {
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend": {
+      "head": "f2c6c9931c972c001e6acfec80edfe3fd281a1be",
+      "branch": "main"
+    },
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev": {
+      "head": "c18b4572cb80ea8c23910bad7c7d04be8a24951e",
+      "branch": "feature/prd-stitch-ui-adaptation"
+    }
+  },
+  "changedFiles": {
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/domain/owner_truth/memory_changeset.py": "df8b55467e234b8fd5f0b025a96215ac7d8599617f17599e9d6e458ac7bb3c5d",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/test_owner_truth_same_source_polarity.py": "ac19c787cbfe8148cd1c4651a3dd8881da48fe68e20f10d5cd5d2989c06b37fd",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/tests/fixtures/same_source_polarity_group.json": "1e7f669f2baa8373cd46e964f3ef1d8fef45876722bb0f0c581efafa10a3abc0",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourney/Sources/Modules/Archive/MemoryArchiveViewController.swift": "1c04c85ff64f2e3c7cf861829d740a2496ffe827d075bd98e09728bcfe98e831",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourneyTests/OwnerTruthContractsTests.swift": "1a5a7255aa9db7001b657d1679d434a1b79d273558d958ef38570e9a222306ea",
+    "/Users/gaominge/Documents/liftora/tools/live_device_lab/binding_contract.py": "98c1be4b39a6e9b889098de9abbfa999c82e13423c4c28843841e6497b6af465",
+    "/Users/gaominge/Documents/liftora/tools/live_device_lab/conversation_cases.py": "884323f6fb22d6cfc8b2c38cc988b812049432a5907293df60311d94ec43f6df",
+    "/Users/gaominge/Documents/liftora/tools/live_device_lab/lab.py": "d5724ce71250981e6acfdb544972a8405428fd6ed977b25e0afc2a50d76c5ed7",
+    "/Users/gaominge/Documents/liftora/tools/live_device_lab/recovery_binding.py": "b1f855d6898e83842c6125356823ffe6f8ebddba94b0af2f55985958ee3b2739",
+    "/Users/gaominge/Documents/liftora/tools/live_device_lab/stage.py": "bf398b9d30ad1347235ef8f51895f1ad96d4157d6174d695258e9d912a76dda9",
+    "/Users/gaominge/Documents/liftora/tools/live_device_lab/test_binding.py": "0a76bc9890227a5b6cb431e0121a0789533c4192cd78356031713a4435ef90cf",
+    "/Users/gaominge/Documents/liftora/tools/live_device_lab/test_conversation_cases.py": "dd3297a119ebea242c63d93585c55cdb4e92ee1a1cf5d0bc6ed0fe82e5f62440",
+    "/Users/gaominge/Documents/liftora/tools/live_device_lab/test_lab.py": "0074cc5c0d210faee0a3f2d935f6724aa18795b5047348ae5578ca9c8621fecf"
+  },
+  "protectedFiles": {
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourney/Sources/Modules/Echo/EchoViewController.swift": "85a41e6250eb4d2b1a0ce405a92cef5e16e5aa0bd21f020c0390719496171a95",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourney/Sources/Domain/OwnerTruth/OwnerTruthContracts.swift": "2ffb65153786a0f79456494890c12effefb6b9c5a2780331f6eea283a4e12095",
+    "/Users/gaominge/Documents/Codex/Video/DreamJourney_dev/DreamJourney/Sources/Services/DialogEngineManager.swift": "1bc342a76c03f65e543059b912e33ccb2216191f323a1441433e21099e76489d"
+  }
+}

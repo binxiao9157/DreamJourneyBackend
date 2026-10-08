@@ -1,0 +1,96 @@
+test_23_members_preview_commit_and_replay (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_fallback_all_polarities_have_actual_diffs (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_fallback_includes_other_business_changes (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_known_opposition_stays_dispute (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_new_exception_does_not_cross_boundaries (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_real_pair_both_orders_add_evidence_and_preserve_target (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_same_evidence_is_duplicate (tests.test_owner_truth_same_source_polarity.SameSourcePolarityTests) ... ok
+test_activation_preserves_reviewed_content_and_both_source_spans (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_captured_applicability_and_missing_fields_only_add_evidence (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_captured_scenario_suffix_only_adds_evidence (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_conflicting_place_identity_is_not_dropped (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_cross_subject_not_merged (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_existing_evidence_is_duplicate_even_with_extractor_drift (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_explicit_change_and_unsafe_differences_do_not_use_repetition (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_explicit_correction_remains_correction (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_explicit_date_in_either_fact_does_not_take_new_rule (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_virtual_group_uses_one_memory_and_replay_is_idempotent (tests.test_owner_truth_same_source_repetition.SameSourceRepetitionTests) ... ok
+test_explicit_correction_targets_current_version (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_owner_visible_proposal_binds_target_before_after_and_evidence_diff (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_owner_visible_proposal_hash_changes_when_rendered_fact_diff_changes (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_past_and_current_preference_is_a_temporal_change_not_a_conflict (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_question_is_not_promoted_to_a_cross_session_fact (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_same_fact_with_a_new_source_adds_evidence (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_same_fact_with_same_evidence_is_deduplicated (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_same_input_and_revision_produces_the_same_changeset_id (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_same_scope_opposite_polarity_is_a_dispute (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_unknown_or_different_subject_is_not_merged (tests.test_owner_truth_memory_changeset.OwnerTruthMemoryChangeSetTests) ... ok
+test_duplicate_confirmation_has_a_receipt_but_does_not_advance_revision (tests.test_owner_truth_memory_changeset_review.OwnerTruthMemoryChangeSetReviewTests) ... ok
+test_new_evidence_supersedes_the_current_version_instead_of_adding_a_record (tests.test_owner_truth_memory_changeset_review.OwnerTruthMemoryChangeSetReviewTests) ... ok
+test_stale_revision_rolls_back_the_candidate_decision_and_receipt (tests.test_owner_truth_memory_changeset_review.OwnerTruthMemoryChangeSetReviewTests) ... ok
+test_v5_preview_is_rejected_after_another_review_advances_revision (tests.test_owner_truth_memory_changeset_review.OwnerTruthMemoryChangeSetReviewTests) ... ok
+test_v5_review_requires_a_fresh_owner_visible_changeset_proposal (tests.test_owner_truth_memory_changeset_review.OwnerTruthMemoryChangeSetReviewTests) ... ok
+test_dependent_candidates_preview_then_commit_as_one_group (tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests) ... ok
+test_group_correction_uses_reextracted_value_for_preview_and_activation (tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests) ... ok
+test_owner_text_correction_reextracts_v5_fields_without_stale_semantics (tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests) ... ok
+test_second_formal_write_failure_rolls_back_every_member (tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests) ... ok
+test_second_outbox_failure_rolls_back_every_member_and_effect (tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests) ... ok
+test_second_receipt_failure_rolls_back_every_member (tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests) ... ok
+test_stale_group_preview_does_not_partially_decide_candidates (tests.test_owner_truth_memory_changeset_group_review.OwnerTruthMemoryChangeSetGroupReviewTests) ... ok
+test_duplicate_creates_no_new_version (tests.test_owner_truth_memory_changeset_activation.OwnerTruthMemoryChangeSetActivationTests) ... ok
+test_new_evidence_revises_one_existing_memory_and_merges_lineage (tests.test_owner_truth_memory_changeset_activation.OwnerTruthMemoryChangeSetActivationTests) ... ok
+test_atom_cannot_be_published_in_two_cards (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_formal_supplement_is_new_related_pending_proposal (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_independent_topic_survives_conflict_in_another (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_multi_dimension_one_theme_and_explicit_omissions (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_omissions_cannot_silently_disappear (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_pending_revision_keeps_topic_identity_without_mutating_old (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_rejected_or_formal_same_facts_do_not_resurrect (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_same_snapshot_retry_is_idempotent_and_changed_content_rejected (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_scope_does_not_cross_account (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_stale_page_cannot_confirm_a_new_version (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_stale_support_does_not_validate_new_summary (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_support_cannot_promote_superseded_atom (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_unknown_dimensions_are_not_inferred (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_unsupported_time_or_event_does_not_force_merge (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_wrong_source_evidence_rejected (tests.test_owner_truth_live_topics.LiveThemeContractTests) ... ok
+test_control_cannot_support_invented_fact (tests.test_typed_echo_repair.SupportTests) ... ok
+test_fact_and_conversation_control_preserve_exact_fact (tests.test_typed_echo_repair.SupportTests) ... ok
+test_missing_turn_and_wrong_evidence_still_rejected (tests.test_typed_echo_repair.SupportTests) ... ok
+test_mixed_control_correction_emotion_remains_fact (tests.test_typed_echo_repair.SupportTests) ... ok
+test_pure_control_has_no_fact_requirement (tests.test_typed_echo_repair.SupportTests) ... ok
+test_real_fact_omission_still_rejected (tests.test_typed_echo_repair.SupportTests) ... ok
+test_emotion_edit (tests.test_typed_echo_repair.ThemeCommandTests) ... /Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/main.py:7994: DeprecationWarning:
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+  @app.on_event("startup")
+/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/.venv/lib/python3.9/site-packages/fastapi/applications.py:4495: DeprecationWarning:
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+  return self.router.on_event(event_type)
+/Users/gaominge/Documents/Codex/Video/DreamJourneyBackend/app/main.py:8012: DeprecationWarning:
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+  @app.on_event("shutdown")
+ok
+test_experience_edit (tests.test_typed_echo_repair.ThemeCommandTests) ... ok
+test_knowledge_edit (tests.test_typed_echo_repair.ThemeCommandTests) ... ok
+test_bound_kind_selects_primary_field (tests.test_typed_echo_repair.ThemeEditBindingTests) ... ok
+test_changing_primary_does_not_copy_stale_facets (tests.test_typed_echo_repair.ThemeEditBindingTests) ... ok
+test_mismatched_candidate_binding_is_rejected (tests.test_typed_echo_repair.ThemeEditBindingTests) ... ok
+test_noop_edit_remains_complete_and_valid (tests.test_typed_echo_repair.ThemeEditBindingTests) ... ok
+test_unknown_kind_is_rejected (tests.test_typed_echo_repair.ThemeEditBindingTests) ... ok
+
+----------------------------------------------------------------------
+Ran 70 tests in 0.626s
+
+OK
