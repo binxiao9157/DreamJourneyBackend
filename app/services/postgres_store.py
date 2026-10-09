@@ -2074,6 +2074,13 @@ class PostgresStore:
             raise RuntimeError("realtime voice ticket insert did not produce a row")
         return deepcopy(row["payload"])
 
+    def get_active_realtime_voice_session_ticket(self, ticket_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT payload FROM realtime_voice_session_tickets WHERE id = %s AND user_id = %s AND status = 'active'",
+            (ticket_id, user_id),
+        )
+        return deepcopy(row["payload"]) if row else None
+
     def consume_realtime_voice_session_ticket(
         self,
         ticket_hash: str,

@@ -763,11 +763,16 @@ def main() -> None:
             lock_timeout_ms=1000,
             statement_timeout_ms=15000,
         )
-        upgrade = migrator.apply()
+        # Exercise the historical 0121 upgrade on its exact boundary, then
+        # apply later migrations before testing today's services.
+        upgrade = apply_migrations_through(
+            test_dsn, build_id="formal-memory-upgrade-0121", final_version="0121",
+        )
         require(
             upgrade["appliedVersions"] == ["0121"],
             "upgrade fixture must apply only migration 0121",
         )
+        migrator.apply()
         verified = migrator.verify()
         require(verified["status"] == "ready", "migration head must verify")
         verify_legacy_rebuild_request_upgrade(test_dsn)

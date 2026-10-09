@@ -54,14 +54,21 @@ class PostgresLiveTopicRepository:
             except (ValueError,TypeError):raise LiveThemeConflict('invalidThemePage') from None
         with self._cursor() as cur:
             epoch=self._authority(cur,context,lock=False)
-            cur.execute("""SELECT r.payload FROM owner_truth.live_memory_topics t
+            cur.execute("""SELECT r.payload, s.created_at AS source_created_at FROM owner_truth.live_memory_topics t
                 JOIN owner_truth.live_memory_topic_revisions r ON r.topic_id=t.id AND r.version=t.current_version
                 JOIN owner_truth.sources s ON s.id=r.source_id
                 WHERE t.vault_id=%s AND t.owner_subject_id=%s AND t.authority_epoch=%s AND t.state='pending'
                   AND s.state='active' AND s.authority_epoch=t.authority_epoch AND s.owner_subject_id=t.owner_subject_id
                   AND (%s::uuid IS NULL OR t.id>%s::uuid)
                 ORDER BY t.id LIMIT %s""",(context.vault_id,context.owner_subject_id,epoch,after_id,after_id,limit+1))
-            rows=cur.fetchall();page=[r['payload'] for r in rows[:limit]]
+            rows=cur.fetchall();page=[]
+            for row in rows[:limit]:
+                # Read projection only: never modify the signed revision stored in PG.
+                payload=dict(row['payload'])
+                recorded_at=row.get('source_created_at')
+                if recorded_at is not None:
+                    payload['sourceCreatedAt']=recorded_at.isoformat()
+                page.append(payload)
             for payload in page:self._member_details(cur,payload)
             return {'themes':page,'nextCursor':page[-1]['topicId'] if len(rows)>limit else None}
 

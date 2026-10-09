@@ -8,6 +8,7 @@ falls back transparently to text instead of pretending semantic retrieval ran.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from typing import Any, Protocol
 
 from app.domain.owner_truth.candidate_decisions import OwnerTruthCandidateReviewAccessDenied
@@ -15,6 +16,7 @@ from app.domain.owner_truth.memory_projection import OwnerTruthMemoryProjectionA
 from app.domain.owner_truth.search_documents import (
     OWNER_TRUTH_MEMORY_SEARCH_MAX_LIMIT,
     OWNER_TRUTH_MEMORY_SEARCH_RETRIEVAL_MODE,
+    OwnerTruthMemorySearchHit,
     OwnerTruthMemorySearchReadError,
     OwnerTruthMemorySearchReadResult,
     OwnerTruthSearchDocumentProjectionError,
@@ -27,6 +29,7 @@ from app.services.owner_truth_memory_search_projection import (
 )
 from app.services.owner_truth_memory_search_hybrid import (
     OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RETRIEVAL_MODE,
+    OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RRF_K,
     OwnerTruthMemorySearchHybridRanker,
     OwnerTruthMemorySearchHybridUnavailable,
 )
@@ -129,9 +132,13 @@ class OwnerTruthMemorySearchReadService:
                             # hits. The deterministic branch remains observable.
                             pass
                         else:
-                            hits = hybrid.hits
-                            retrieval_mode = OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RETRIEVAL_MODE
-                            semantic_ranking_available = True
+                            # Vectors are asynchronous derived data. An empty
+                            # or partial current vector index must not erase
+                            # facts already found in the current text index.
+                            if hybrid.hits:
+                                hits = _fuse_current_hits(hits, hybrid.hits, limit=query_plan.limit)
+                                retrieval_mode = OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RETRIEVAL_MODE
+                                semantic_ranking_available = True
                 return OwnerTruthMemorySearchReadResult(
                     state="ready",
                     projection=projection,
@@ -148,6 +155,40 @@ class OwnerTruthMemorySearchReadService:
             raise OwnerTruthMemorySearchReadAccessDenied(str(error)) from error
         except OwnerTruthSearchDocumentProjectionError as error:
             raise OwnerTruthMemorySearchReadError(str(error)) from error
+
+
+def _fuse_current_hits(
+    lexical: tuple[OwnerTruthMemorySearchHit, ...],
+    hybrid: tuple[OwnerTruthMemorySearchHit, ...],
+    *,
+    limit: int,
+) -> tuple[OwnerTruthMemorySearchHit, ...]:
+    """Fuse two already-current, scope-checked lanes; never hydrate old facts.
+
+    Each lane contributes at most its existing candidate limit. Duplicate
+    versions share one result, and lexical rank breaks equal-score ties so
+    a not-yet-embedded fact is not penalized solely for worker timing.
+    """
+    by_version: dict[str, OwnerTruthMemorySearchHit] = {}
+    ranks: dict[str, dict[int, int]] = {}
+    for lane, hits in enumerate((lexical, hybrid)):
+        for hit in hits:
+            version = hit.document.memory_version_id
+            existing = by_version.get(version)
+            if existing is not None and existing.document != hit.document:
+                raise OwnerTruthMemorySearchReadError("retrieval lanes disagree on current document")
+            # Preserve hybrid provenance when that lane contributed to an
+            # overlapping result; lexical-only facts keep their own kind.
+            by_version[version] = hit
+            ranks.setdefault(version, {})[lane] = hit.rank
+    def ordering(version: str) -> tuple[float, int, int, str]:
+        positions = ranks[version]
+        score = sum(1.0 / (OWNER_TRUTH_MEMORY_SEARCH_HYBRID_RRF_K + rank) for rank in positions.values())
+        return (-score, positions.get(0, limit + 1), positions.get(1, limit + 1), version)
+    return tuple(
+        replace(by_version[version], rank=index)
+        for index, version in enumerate(sorted(by_version, key=ordering)[:limit], start=1)
+    )
 
 
 def memory_search_presentation(

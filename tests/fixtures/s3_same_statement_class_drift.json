@@ -1,0 +1,248 @@
+{
+  "period-2016": {
+    "kind": "experience",
+    "content": {
+      "time": {
+        "end": null,
+        "start": null,
+        "precision": "unknown"
+      },
+      "event": "2016年，我喜欢喝乌龙茶。",
+      "affect": null,
+      "facets": {
+        "time": [
+          {
+            "value": "2016年",
+            "confidence": 1.0,
+            "evidenceMode": "ownerStated"
+          }
+        ],
+        "goals": [],
+        "habits": [],
+        "people": [],
+        "places": [],
+        "values": [],
+        "emotions": [],
+        "identity": [],
+        "confidence": 0.9,
+        "personality": [],
+        "reflections": [],
+        "relationships": []
+      },
+      "object": {
+        "label": "乌龙茶",
+        "category": null,
+        "entityId": null
+      },
+      "actions": [],
+      "outcome": null,
+      "factType": "preference",
+      "location": null,
+      "semantic": {
+        "title": "2016年，我喜欢喝乌龙茶",
+        "facets": [
+          "lifeEvent"
+        ],
+        "entities": [],
+        "eventTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "narrative": "2016年，我喜欢喝乌龙茶。",
+        "primaryKind": "lifeEvent",
+        "emotionEvidence": []
+      },
+      "predicate": "喜欢喝",
+      "statement": "2016年，我喜欢喝乌龙茶。",
+      "dimensions": [
+        "lifeEvents",
+        "preferences"
+      ],
+      "provenance": {
+        "mode": "selfReport",
+        "evidenceRefs": [],
+        "speakerPersonId": null,
+        "contributorAccountId": null
+      },
+      "qualifiers": {
+        "place": null,
+        "polarity": "positive",
+        "scenario": null,
+        "validTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": "2016年"
+        },
+        "strengthExpression": "喜欢",
+        "superlativeAsserted": false,
+        "currentApplicability": "historical"
+      },
+      "participants": [],
+      "claimSubjectId": null,
+      "memorySubjectId": null
+    }
+  },
+  "period-2025": {
+    "kind": "experience",
+    "content": {
+      "time": {
+        "end": null,
+        "start": null,
+        "precision": "unknown"
+      },
+      "event": "2025年，我喜欢喝乌龙茶。",
+      "affect": null,
+      "facets": {
+        "time": [
+          {
+            "value": "2025年",
+            "confidence": 1.0,
+            "evidenceMode": "ownerStated"
+          }
+        ],
+        "goals": [],
+        "habits": [],
+        "people": [],
+        "places": [],
+        "values": [],
+        "emotions": [],
+        "identity": [],
+        "confidence": 0.9,
+        "personality": [],
+        "reflections": [],
+        "relationships": []
+      },
+      "object": {
+        "label": "乌龙茶",
+        "category": null,
+        "entityId": null
+      },
+      "actions": [],
+      "outcome": null,
+      "factType": "preference",
+      "location": null,
+      "semantic": {
+        "title": "2025年，我喜欢喝乌龙茶",
+        "facets": [
+          "lifeEvent"
+        ],
+        "entities": [],
+        "eventTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "narrative": "2025年，我喜欢喝乌龙茶。",
+        "primaryKind": "lifeEvent",
+        "emotionEvidence": []
+      },
+      "predicate": "喜欢喝",
+      "statement": "2025年，我喜欢喝乌龙茶。",
+      "dimensions": [
+        "lifeEvents",
+        "preferences"
+      ],
+      "provenance": {
+        "mode": "selfReport",
+        "evidenceRefs": [],
+        "speakerPersonId": null,
+        "contributorAccountId": null
+      },
+      "qualifiers": {
+        "place": null,
+        "polarity": "positive",
+        "scenario": null,
+        "validTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": "2025年"
+        },
+        "strengthExpression": "喜欢",
+        "superlativeAsserted": false,
+        "currentApplicability": "historical"
+      },
+      "participants": [],
+      "claimSubjectId": null,
+      "memorySubjectId": null
+    }
+  },
+  "period-repeat": {
+    "kind": "knowledge",
+    "content": {
+      "affect": null,
+      "facets": {
+        "time": [
+          {
+            "value": "2025年",
+            "confidence": 1.0,
+            "evidenceMode": "ownerStated"
+          }
+        ],
+        "goals": [],
+        "habits": [],
+        "people": [],
+        "places": [],
+        "values": [],
+        "emotions": [],
+        "identity": [],
+        "confidence": 0.9,
+        "personality": [],
+        "reflections": [],
+        "relationships": []
+      },
+      "object": {
+        "label": "乌龙茶",
+        "category": null,
+        "entityId": null
+      },
+      "domains": [],
+      "factType": "preference",
+      "semantic": {
+        "title": "2025年，我喜欢喝乌龙茶",
+        "facets": [
+          "knowledge"
+        ],
+        "entities": [],
+        "eventTime": null,
+        "narrative": "2025年，我喜欢喝乌龙茶。",
+        "primaryKind": "knowledge",
+        "emotionEvidence": []
+      },
+      "predicate": "喜欢喝",
+      "statement": "2025年，我喜欢喝乌龙茶。",
+      "dimensions": [
+        "knowledgeSkills",
+        "preferences"
+      ],
+      "exceptions": [],
+      "provenance": {
+        "mode": "selfReport",
+        "evidenceRefs": [],
+        "speakerPersonId": null,
+        "contributorAccountId": null
+      },
+      "qualifiers": {
+        "place": null,
+        "polarity": "positive",
+        "scenario": null,
+        "validTime": {
+          "end": null,
+          "start": null,
+          "precision": "year",
+          "expression": "2025年"
+        },
+        "strengthExpression": "喜欢",
+        "superlativeAsserted": false,
+        "currentApplicability": "historical"
+      },
+      "learnedFrom": null,
+      "applicability": null,
+      "knowledgeType": "personal_experience",
+      "claimSubjectId": null,
+      "memorySubjectId": null
+    }
+  }
+}

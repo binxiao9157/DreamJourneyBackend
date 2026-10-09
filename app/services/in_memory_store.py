@@ -1287,6 +1287,13 @@ class InMemoryStore:
             self._realtime_voice_session_tickets[str(item["ticketId"])] = item
         return deepcopy(item)
 
+    def get_active_realtime_voice_session_ticket(self, ticket_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        with self._realtime_voice_lock:
+            record = self._realtime_voice_session_tickets.get(ticket_id)
+            if not record or record.get("userId") != user_id or record.get("status") != "active":
+                return None
+            return deepcopy(record)
+
     def consume_realtime_voice_session_ticket(
         self,
         ticket_hash: str,

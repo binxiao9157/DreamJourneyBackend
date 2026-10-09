@@ -1148,7 +1148,7 @@ class TokenAndProxyTests(HiddenStageContractTestCase):
         self.assertEqual(request["json"]["response_format"], {"type": "json_object"})
         self.assertEqual(request["json"]["thinking"], {"type": "disabled"})
         self.assertGreaterEqual(request["json"]["max_tokens"], 4_096)
-        self.assertEqual(proxy.prompt_version, "owner-truth-text-memory-organization-v5")
+        self.assertEqual(proxy.prompt_version, "owner-truth-text-memory-organization-v7")
 
     def test_text_memory_organization_binds_primary_and_owner_stated_facets_to_source(self):
         source = "我的专业是计算机科学。"

@@ -164,6 +164,13 @@ class RealtimeVoiceSessionBroker:
             "maxSessionSeconds": resource_profile["maxSessionSeconds"],
             "maxSessionBytes": resource_profile["maxSessionBytes"],
         }
+        if (getattr(self.settings, "owner_truth_live_context_update_enabled", False)
+                and purpose == "echoLive" and persona_scope == "personal"
+                and str(target_persona_id or user_id) == user_id
+                and resolved_product_session_id and resolved_provider_context_hash
+                and isinstance(session_context, Mapping)
+                and session_context.get("contextUpdateVersion") == 1):
+            record["contextUpdateKey"] = secrets.token_hex(32)
         if diagnostic_stage is not None:
             try:
                 diagnostic_stage("ticketStoreBegin")
@@ -226,6 +233,9 @@ class RealtimeVoiceSessionBroker:
             }
         if isinstance(session_context, Mapping):
             response["sessionContext"] = dict(session_context)
+            response["sessionContext"].pop("contextUpdateVersion", None)
+        if record.get("contextUpdateKey"):
+            response["contextUpdate"] = {"version": 1, "ticketId": ticket_id}
         return response
 
     def consume(self, raw_ticket: str) -> Optional[Dict[str, Any]]:
@@ -527,7 +537,9 @@ class RealtimeVoiceSessionBroker:
         *,
         lease: Optional[Dict[str, Any]] = None,
     ) -> None:
+        from app.services.realtime_voice_context import RealtimeContextFrames
         search_frames = RealtimeSearchFrames(self.settings, lease)
+        context_frames = RealtimeContextFrames(lease)
         while True:
             message = await client.receive()
             message_type = str(message.get("type") or "")
@@ -537,6 +549,14 @@ class RealtimeVoiceSessionBroker:
                 original = message["bytes"]
                 traffic_budget.consume(original)
                 forwarded = search_frames.transform(original)
+                before_sequence = context_frames.next_sequence
+                forwarded = context_frames.transform(forwarded)
+                if forwarded is None:
+                    continue
+                if context_frames.next_sequence != before_sequence:
+                    # Use the existing authority fence again immediately before applying.
+                    if not await asyncio.to_thread(self.is_lease_authorized, lease):
+                        raise RealtimeVoiceAuthorizationRevoked("realtime voice authorization revoked")
                 # Charge additional serialized bytes without charging original twice.
                 if len(forwarded) > traffic_budget.max_frame_bytes:
                     raise RealtimeVoiceTrafficLimitExceeded("realtime voice frame limit exceeded")

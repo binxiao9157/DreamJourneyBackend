@@ -1,0 +1,542 @@
+{
+  "period-2016": [
+    {
+      "id": "68e86fb3-a9f4-5f7b-a917-b832ed0395f9",
+      "decision_status": "accepted",
+      "payload": {
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "2016年，我喜欢喝乌龙茶。",
+          "affect": null,
+          "facets": {
+            "time": [
+              {
+                "value": "2016年",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "goals": [],
+            "habits": [],
+            "people": [],
+            "places": [],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": null,
+          "actions": [],
+          "outcome": null,
+          "factType": "event",
+          "location": null,
+          "semantic": {
+            "title": "2016年，我喜欢喝乌龙茶",
+            "facets": [
+              "lifeEvent"
+            ],
+            "entities": [],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "2016年，我喜欢喝乌龙茶。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "occurred",
+          "statement": "2016年，我喜欢喝乌龙茶。",
+          "dimensions": [
+            "lifeEvents"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "02cedd37-a75b-53fd-85ca-83a94e1650d3",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": null,
+            "polarity": "unknown",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": "2016年"
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "participants": [],
+          "claimSubjectId": null,
+          "memorySubjectId": null
+        },
+        "confidence": 0.0,
+        "reviewMode": "single",
+        "sensitivity": "standard",
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 14,
+              "start": 0
+            },
+            "sourceId": "02cedd37-a75b-53fd-85ca-83a94e1650d3",
+            "sourceVersion": 1
+          }
+        ],
+        "proposalHash": "64161566b6e2b3895c3cc3f0e355f9ac8cf195051813ff690b2e7bb821e694be",
+        "candidateKind": "experience",
+        "schemaVersion": "owner-truth-candidate-proposal-v1",
+        "epistemicStatus": "recalled",
+        "perspectiveType": "firstPerson",
+        "contentSchemaVersion": "owner-truth-v5"
+      }
+    },
+    {
+      "id": "9b2865d4-8cb3-5de1-9fd4-9a9def3b57d4",
+      "decision_status": "pending",
+      "payload": {
+        "content": {
+          "affect": null,
+          "facets": {
+            "time": [
+              {
+                "value": "2016年",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "goals": [],
+            "habits": [],
+            "people": [],
+            "places": [],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": null,
+          "domains": [],
+          "factType": "preference",
+          "semantic": {
+            "title": "2016年，我喜欢喝乌龙茶",
+            "facets": [
+              "knowledge"
+            ],
+            "entities": [],
+            "eventTime": null,
+            "narrative": "2016年，我喜欢喝乌龙茶。",
+            "primaryKind": "knowledge",
+            "emotionEvidence": []
+          },
+          "predicate": "prefers",
+          "statement": "2016年，我喜欢喝乌龙茶。",
+          "dimensions": [
+            "knowledgeSkills",
+            "preferences"
+          ],
+          "exceptions": [],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "02cedd37-a75b-53fd-85ca-83a94e1650d3",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": null,
+            "polarity": "positive",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": "2016年"
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "learnedFrom": null,
+          "applicability": null,
+          "knowledgeType": "personal_experience",
+          "claimSubjectId": null,
+          "memorySubjectId": null
+        },
+        "confidence": 0.0,
+        "reviewMode": "single",
+        "sensitivity": "standard",
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 14,
+              "start": 0
+            },
+            "sourceId": "02cedd37-a75b-53fd-85ca-83a94e1650d3",
+            "sourceVersion": 1
+          }
+        ],
+        "proposalHash": "0aee8f33b907c54f871d159dd1cca3f47f2c6e0be219c75be4bdd4b1eb813b33",
+        "candidateKind": "knowledge",
+        "schemaVersion": "owner-truth-candidate-proposal-v1",
+        "epistemicStatus": "recalled",
+        "perspectiveType": "firstPerson",
+        "contentSchemaVersion": "owner-truth-v5"
+      }
+    }
+  ],
+  "period-2025": [
+    {
+      "id": "8d167049-38b0-57b7-a2a5-977c51539819",
+      "decision_status": "pending",
+      "payload": {
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "2025年，我喜欢喝乌龙茶。",
+          "affect": null,
+          "facets": {
+            "time": [
+              {
+                "value": "2025年",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "goals": [],
+            "habits": [],
+            "people": [],
+            "places": [],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": {
+            "label": "乌龙茶",
+            "category": null,
+            "entityId": null
+          },
+          "actions": [],
+          "outcome": null,
+          "factType": "preference",
+          "location": null,
+          "semantic": {
+            "title": "2025年，我喜欢喝乌龙茶",
+            "facets": [
+              "lifeEvent"
+            ],
+            "entities": [],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "2025年，我喜欢喝乌龙茶。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "喜欢喝",
+          "statement": "2025年，我喜欢喝乌龙茶。",
+          "dimensions": [
+            "lifeEvents",
+            "preferences"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "c8846f72-2791-5a1a-81c7-eee3b6bb41bb",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": null,
+            "polarity": "positive",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": "2025年"
+            },
+            "strengthExpression": "喜欢",
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "participants": [],
+          "claimSubjectId": null,
+          "memorySubjectId": null
+        },
+        "confidence": 0.0,
+        "reviewMode": "single",
+        "sensitivity": "standard",
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 14,
+              "start": 0
+            },
+            "sourceId": "c8846f72-2791-5a1a-81c7-eee3b6bb41bb",
+            "sourceVersion": 1
+          }
+        ],
+        "proposalHash": "37695dda48cc140d3ca5712242f1a92e10ba38a044b0002fcde9c4ad0b975a87",
+        "candidateKind": "experience",
+        "schemaVersion": "owner-truth-candidate-proposal-v1",
+        "epistemicStatus": "recalled",
+        "perspectiveType": "firstPerson",
+        "contentSchemaVersion": "owner-truth-v5"
+      }
+    },
+    {
+      "id": "aaf82b23-e331-5d45-ae9c-b66a996a367b",
+      "decision_status": "pending",
+      "payload": {
+        "content": {
+          "affect": null,
+          "facets": {
+            "time": [
+              {
+                "value": "2025年",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "goals": [],
+            "habits": [],
+            "people": [],
+            "places": [],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": {
+            "label": "乌龙茶",
+            "category": null,
+            "entityId": null
+          },
+          "domains": [],
+          "factType": "preference",
+          "semantic": {
+            "title": "2025年，我喜欢喝乌龙茶",
+            "facets": [
+              "knowledge"
+            ],
+            "entities": [],
+            "eventTime": null,
+            "narrative": "2025年，我喜欢喝乌龙茶。",
+            "primaryKind": "knowledge",
+            "emotionEvidence": []
+          },
+          "predicate": "喜欢喝",
+          "statement": "2025年，我喜欢喝乌龙茶。",
+          "dimensions": [
+            "knowledgeSkills",
+            "preferences"
+          ],
+          "exceptions": [],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "c8846f72-2791-5a1a-81c7-eee3b6bb41bb",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": null,
+            "polarity": "positive",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": "2025年"
+            },
+            "strengthExpression": "喜欢",
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "learnedFrom": null,
+          "applicability": null,
+          "knowledgeType": "personal_experience",
+          "claimSubjectId": null,
+          "memorySubjectId": null
+        },
+        "confidence": 0.0,
+        "reviewMode": "single",
+        "sensitivity": "standard",
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 14,
+              "start": 0
+            },
+            "sourceId": "c8846f72-2791-5a1a-81c7-eee3b6bb41bb",
+            "sourceVersion": 1
+          }
+        ],
+        "proposalHash": "1e7b9371edc2c969801db5a925848ab626d5819b3133c2552f25ed91102457f5",
+        "candidateKind": "knowledge",
+        "schemaVersion": "owner-truth-candidate-proposal-v1",
+        "epistemicStatus": "recalled",
+        "perspectiveType": "firstPerson",
+        "contentSchemaVersion": "owner-truth-v5"
+      }
+    }
+  ],
+  "period-repeat": [
+    {
+      "id": "bb9cba2e-1c3b-5a2e-9a13-9efe37259eb2",
+      "decision_status": "accepted",
+      "payload": {
+        "content": {
+          "affect": null,
+          "facets": {
+            "time": [
+              {
+                "value": "2025年",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "goals": [],
+            "habits": [],
+            "people": [],
+            "places": [],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": {
+            "label": "乌龙茶",
+            "category": null,
+            "entityId": null
+          },
+          "domains": [],
+          "factType": "preference",
+          "semantic": {
+            "title": "2025年，我喜欢喝乌龙茶",
+            "facets": [
+              "knowledge"
+            ],
+            "entities": [],
+            "eventTime": null,
+            "narrative": "2025年，我喜欢喝乌龙茶。",
+            "primaryKind": "knowledge",
+            "emotionEvidence": []
+          },
+          "predicate": "喜欢喝",
+          "statement": "2025年，我喜欢喝乌龙茶。",
+          "dimensions": [
+            "knowledgeSkills",
+            "preferences"
+          ],
+          "exceptions": [],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "1ecdcabc-4e03-5eb7-ad55-06f0a6c51074",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": null,
+            "polarity": "positive",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "year",
+              "expression": "2025年"
+            },
+            "strengthExpression": "喜欢",
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "learnedFrom": null,
+          "applicability": null,
+          "knowledgeType": "personal_experience",
+          "claimSubjectId": null,
+          "memorySubjectId": null
+        },
+        "confidence": 0.0,
+        "reviewMode": "single",
+        "sensitivity": "standard",
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 14,
+              "start": 0
+            },
+            "sourceId": "1ecdcabc-4e03-5eb7-ad55-06f0a6c51074",
+            "sourceVersion": 1
+          }
+        ],
+        "proposalHash": "7b02bbc919bf032e5513989953ee8ada389b0d285376dcdc4ecf8d0bc2521819",
+        "candidateKind": "knowledge",
+        "schemaVersion": "owner-truth-candidate-proposal-v1",
+        "epistemicStatus": "recalled",
+        "perspectiveType": "firstPerson",
+        "contentSchemaVersion": "owner-truth-v5"
+      }
+    }
+  ]
+}

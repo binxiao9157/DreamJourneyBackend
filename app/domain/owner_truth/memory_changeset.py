@@ -916,6 +916,128 @@ def _operation(
     )
 
 
+def _exact_year_preference_shape(content: Mapping[str, Any]) -> str | None:
+    """Ignore only class packaging for an identical, explicitly dated preference.
+
+    This is not a semantic similarity matcher. It preserves every meaningful
+    residual field and only normalizes unknown/year for the same literal year.
+    The reviewed target content is never replaced by this representation.
+    """
+    value = _copy_mapping(content, field="exact year restatement")
+    statement = _visible_text(value.get("statement"))
+    qualifiers = value.get("qualifiers")
+    if not statement or value.get("factType") != "preference" or not isinstance(qualifiers, dict):
+        return None
+    when = qualifiers.get("validTime")
+    if not isinstance(when, dict):
+        return None
+    expression = _visible_text(when.get("expression"))
+    if (not re.fullmatch(r"[1-9][0-9]{3}年", expression)
+            or expression not in statement
+            or when.get("precision") not in {"unknown", "year"}
+            or when.get("start") or when.get("end")
+            or qualifiers.get("polarity") not in {"positive", "negative"}):
+        return None
+    provenance = value.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("mode") != "selfReport":
+        return None
+    provenance.pop("evidenceRefs", None)
+    when["precision"] = "year"
+    # Only redundant class wrappers may disappear, never additional facts.
+    if value.get("event") == statement:
+        value.pop("event")
+    if value.get("knowledgeType") in {"personal_experience", "personal_preference"}:
+        value.pop("knowledgeType")
+    if isinstance(value.get("dimensions"), list):
+        value["dimensions"] = sorted(set(value["dimensions"]) - {"lifeEvents", "knowledgeSkills"})
+    semantic = value.get("semantic")
+    if isinstance(semantic, dict):
+        if semantic.get("primaryKind") in {"lifeEvent", "knowledge"}:
+            semantic.pop("primaryKind")
+        if semantic.get("narrative") == statement:
+            semantic.pop("narrative")
+        if _visible_text(semantic.get("title")).rstrip("。.!！?？") == statement.rstrip("。.!！?？"):
+            semantic.pop("title")
+        if isinstance(semantic.get("facets"), list):
+            semantic["facets"] = sorted(set(semantic["facets"]) - {"lifeEvent", "knowledge"})
+
+    def nonempty(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            return {key: cleaned for key, child in item.items()
+                    if (cleaned := nonempty(child)) is not None} or None
+        if isinstance(item, (list, tuple)):
+            return [cleaned for child in item if (cleaned := nonempty(child)) is not None] or None
+        return None if _is_unspecified_semantic_value(item) else item
+
+    return _canonical_json(nonempty(value))
+
+
+def _exact_year_restatement_targets(
+    candidate: OwnerTruthCandidateSnapshot,
+    content: Mapping[str, Any],
+    current: list[tuple[OwnerTruthCurrentFormalMemory, Mapping[str, Any]]],
+) -> list[tuple[OwnerTruthCurrentFormalMemory, Mapping[str, Any]]]:
+    supported = {MemoryKind.EXPERIENCE, MemoryKind.KNOWLEDGE}
+    if candidate.memory_kind not in supported or candidate.perspective_type.value != "firstPerson":
+        return []
+    shape = _exact_year_preference_shape(content)
+    if shape is None:
+        return []
+    matches = [pair for pair in current if pair[0].memory_kind in supported
+               and _assertion_key(content) == _assertion_key(pair[1])
+               and _exact_year_preference_shape(pair[1]) == shape]
+    # Keep the original path for unchanged representations. Account for all
+    # equivalent identities when any class/time representation drift is present.
+    return matches if any(pair[0].memory_kind != candidate.memory_kind
+                          or _fact_shape_json(pair[1]) != _fact_shape_json(content)
+                          for pair in matches) else []
+
+
+def _representation_targets(candidate, content, current, *, same_year):
+    from app.domain.owner_truth.fact_representation import explicit_year, formal_representation_match
+    if candidate.memory_kind not in {MemoryKind.EXPERIENCE, MemoryKind.KNOWLEDGE} or candidate.perspective_type.value != "firstPerson":
+        return []
+    year = explicit_year(content)
+    if not year or (content.get("provenance") or {}).get("mode") != "selfReport":
+        return []
+    return [pair for pair in current
+            if pair[0].memory_kind in {MemoryKind.EXPERIENCE, MemoryKind.KNOWLEDGE}
+            and explicit_year(pair[1])
+            and (explicit_year(pair[1]) == year) == same_year
+            and formal_representation_match(content, pair[1], different_years=not same_year)]
+
+
+def _select_comparable_target(
+    *,
+    candidate: OwnerTruthCandidateSnapshot,
+    content: Mapping[str, Any],
+    comparable: list[tuple[OwnerTruthCurrentFormalMemory, Mapping[str, Any]]],
+    correction: str | None,
+) -> tuple[OwnerTruthCurrentFormalMemory, Mapping[str, Any]] | None:
+    """Select by evidence/scope, never by repository enumeration order.
+
+    A correction names a version or a unique scope. If the named version is
+    no longer current, do not silently redirect it to another formal fact.
+    Ambiguity leaves the candidate independent for owner review.
+    """
+    if correction and correction != "explicit":
+        return None
+    if not correction:
+        exact = [pair for pair in comparable
+                 if _fact_shape_json(content) == _fact_shape_json(pair[1])]
+        if exact:
+            return exact[0] if len(exact) == 1 else None
+        repeated = [pair for pair in comparable if _is_same_source_repetition(
+            candidate=candidate, candidate_content=content,
+            target=pair[0], target_content=pair[1])]
+        if repeated:
+            return repeated[0] if len(repeated) == 1 else None
+    scoped = [pair for pair in comparable if _scope_key(content) == _scope_key(pair[1])]
+    if scoped:
+        return scoped[0] if len(scoped) == 1 else None
+    return comparable[0] if len(comparable) == 1 else None
+
+
 def build_memory_changeset(
     *,
     candidate: OwnerTruthCandidateSnapshot,
@@ -953,6 +1075,16 @@ def build_memory_changeset(
     candidate_polarity = _polarity(candidate_content)
     candidate_evidence = _evidence_keys(candidate.source_refs)
     typed_current = [(item, item.typed_content) for item in current]
+    restatements = ([] if explicit_correction else
+                    _exact_year_restatement_targets(candidate, candidate_content, typed_current))
+    representation_repeats = ([] if explicit_correction else
+        _representation_targets(candidate, candidate_content, typed_current, same_year=True))
+    representation_periods = ([] if explicit_correction else
+        _representation_targets(candidate, candidate_content, typed_current, same_year=False))
+    # The complete candidate set matters: a wrapper-equivalent current identity
+    # must not be ignored merely because another candidate has the same class.
+    if representation_repeats:
+        restatements = representation_repeats
 
     target_by_version = next(
         (
@@ -982,6 +1114,42 @@ def build_memory_changeset(
             candidate_content=candidate_content,
             reason="questionOrEmptyStatement",
         )
+    elif restatements:
+        if len(restatements) != 1:
+            operation = _operation(
+                kind=OwnerTruthMemoryChangeOperationKind.ADD,
+                candidate=candidate, candidate_content=candidate_content,
+                reason="ambiguousExactYearRestatementTargets",
+                added_evidence_count=len(candidate_evidence),
+            )
+        else:
+            target = restatements[0][0]
+            new_evidence = candidate_evidence - _evidence_keys(target.evidence_refs)
+            operation = _operation(
+                kind=(OwnerTruthMemoryChangeOperationKind.ADD_EVIDENCE if new_evidence
+                      else OwnerTruthMemoryChangeOperationKind.DUPLICATE),
+                candidate=candidate, candidate_content=candidate_content, target=target,
+                reason="exactYearPreferencePreservesReviewedFact",
+                changed_fields=("evidenceRefs",) if new_evidence else (),
+                added_evidence_count=len(new_evidence),
+            )
+    elif representation_periods:
+        if len(representation_periods) == 1:
+            target = representation_periods[0][0]
+            operation = _operation(
+                kind=OwnerTruthMemoryChangeOperationKind.TEMPORAL_CHANGE,
+                candidate=candidate, candidate_content=candidate_content, target=target,
+                reason="sameStatementAtDistinctExplicitYears",
+                changed_fields=("qualifiers.validTime",),
+                added_evidence_count=len(candidate_evidence - _evidence_keys(target.evidence_refs)),
+            )
+        else:
+            operation = _operation(
+                kind=OwnerTruthMemoryChangeOperationKind.ADD,
+                candidate=candidate, candidate_content=candidate_content,
+                reason="ambiguousStatementPeriodTargets",
+                added_evidence_count=len(candidate_evidence),
+            )
     else:
         comparable = [
             (item, content)
@@ -997,8 +1165,12 @@ def build_memory_changeset(
             for item, content in comparable
             if not candidate_subject or not _assertion_key(content)[0] or _assertion_key(content)[0] == candidate_subject
         ]
-        if explicit_correction == "explicit" and comparable:
-            target = comparable[0][0]
+        selected = _select_comparable_target(
+            candidate=candidate, content=candidate_content,
+            comparable=comparable, correction=explicit_correction,
+        )
+        if explicit_correction == "explicit" and selected is not None:
+            target = selected[0]
             operation = _operation(
                 kind=OwnerTruthMemoryChangeOperationKind.CORRECT,
                 candidate=candidate,
@@ -1008,16 +1180,18 @@ def build_memory_changeset(
                 changed_fields=("content", "evidenceRefs"),
                 added_evidence_count=len(candidate_evidence - _evidence_keys(target.evidence_refs)),
             )
-        elif not comparable:
+        elif selected is None:
             operation = _operation(
                 kind=OwnerTruthMemoryChangeOperationKind.ADD,
                 candidate=candidate,
                 candidate_content=candidate_content,
-                reason="noComparableCurrentFact",
+                reason=("correctionTargetNotCurrent" if explicit_correction and explicit_correction != "explicit"
+                        else "ambiguousComparableFactsPreservedIndependently" if comparable
+                        else "noComparableCurrentFact"),
                 added_evidence_count=len(candidate_evidence),
             )
         else:
-            target, target_content = comparable[0]
+            target, target_content = selected
             target_evidence = _evidence_keys(target.evidence_refs)
             new_evidence = candidate_evidence - target_evidence
             target_scope = _scope_key(target_content)

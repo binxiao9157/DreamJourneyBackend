@@ -985,6 +985,7 @@ class ReleasePolicyCommandGate:
     _PREFIX_FEATURES: tuple[tuple[str, str], ...] = (
         ("/digital-human/", "digitalHumanLivePanel"),
         ("/voice/realtime-token", "echoTextInput"),
+        ("/voice/realtime-context", "echoTextInput"),
         ("/voice/", "voiceCloneShell"),
         ("/tts", "voiceCloneShell"),
         ("/family/", "familyManagement"),

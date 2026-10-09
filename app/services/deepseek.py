@@ -565,7 +565,7 @@ class DeepSeekTextMemoryOrganizationProxy:
     """Turn one Owner-authored text Source into typed, reviewable memories."""
 
     model = "deepseek-v4-flash"
-    prompt_version = "owner-truth-text-memory-organization-v5"
+    prompt_version = "owner-truth-text-memory-organization-v7"
     maximum_source_characters = 20_000
     maximum_memory_count = 8
     maximum_primary_characters = 1_000
@@ -738,7 +738,7 @@ class DeepSeekTextMemoryOrganizationProxy:
 
 规则：
 1. 最多输出 {cls.maximum_memory_count} 条；没有可靠记忆时输出 {{"memories":[]}}。
-2. 一条记忆只表达一个主要类型；同一段原文可以拆成经历、知识、情感多条记忆。
+2. 按独立事实拆分，不按类别凑条数。同一事实只输出一次，不得把相同经历或偏好分别重复写入experience和knowledge；JSON中的三个类型仅是格式示例，并非每类必须生成。只有独立事实或独立感受才能另列。不要同时输出完整事实和已包含其中的尾句；计划及其尚未开始的限定应保留在同一条完整陈述中。原文明确时间必须保留在主句，不要只放在qualifiers或facets中。个人偏好无论选择experience或knowledge，都应标factType=preference并保留全部原文限定。
 3. experience 必须有 event 和 time；原文没有时间时使用 start/end=null、precision=unknown，绝不能猜日期。
 4. knowledge 必须有 statement、knowledgeType 和 domains；个人经验规律使用 personal_experience，领域不明确时 domains=[]。
 5. emotion 必须有 emotion 和 expression；原文没有明确强度、对象或原因时保持 null。
@@ -774,12 +774,6 @@ class DeepSeekTextMemoryOrganizationProxy:
             raise ValueError("DeepSeek text memory organization returned too many memories")
 
         memories: List[Dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-        primary_fields = {
-            MemoryKind.EXPERIENCE: "event",
-            MemoryKind.KNOWLEDGE: "statement",
-            MemoryKind.EMOTION: "expression",
-        }
         for position, raw_memory in enumerate(raw_memories):
             if not isinstance(raw_memory, Mapping):
                 raise ValueError(f"organized text memory {position} must be an object")
@@ -811,6 +805,12 @@ class DeepSeekTextMemoryOrganizationProxy:
                 )
                 if normalized_content is None:
                     continue
+            if source_text is not None and memory_kind in {MemoryKind.EXPERIENCE, MemoryKind.KNOWLEDGE}:
+                from app.domain.owner_truth.fact_representation import restore_explicit_year_prefix
+                normalized_content = enrich_memory_payload_v5(
+                    kind=memory_kind,
+                    payload=restore_explicit_year_prefix(normalized_content, source_text=source_text),
+                )
             validation = validate_memory_payload(
                 kind=memory_kind,
                 payload=normalized_content,
@@ -820,11 +820,6 @@ class DeepSeekTextMemoryOrganizationProxy:
                 raise ValueError(
                     f"organized text memory {position} violates typed schema: {validation.code}"
                 )
-            primary_value = str(normalized_content.get(primary_fields[memory_kind]) or "").strip()
-            dedupe_key = (memory_kind.value, primary_value)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
             normalized_memory = {
                 "memoryKind": memory_kind.value,
                 "content": normalized_content,
@@ -832,7 +827,8 @@ class DeepSeekTextMemoryOrganizationProxy:
             if require_subject_role:
                 normalized_memory["subjectRole"] = subject_role
             memories.append(normalized_memory)
-        return {"memories": memories}
+        from app.domain.owner_truth.fact_representation import coalesce_source_memories
+        return {"memories": coalesce_source_memories(memories)}
 
     @classmethod
     def _bind_content_to_source(
@@ -2246,6 +2242,7 @@ class DeepSeekEchoAnswerProxy:
         open_domain_repair: bool = False,
         time_zone: str = "UTC",
         public_information: Optional[PublicSearchResult] = None,
+        memory_retrieval_status: str = "unknown",
     ) -> Dict[str, Any]:
         normalized_query = str(query or "").strip()
         if not normalized_query:
@@ -2293,6 +2290,17 @@ class DeepSeekEchoAnswerProxy:
                 "来回避当前发言。请结合最近对话理解省略和代词，再用常识或自然对话直接回应；"
                 "同时不得把最近对话推断成用户的正式经历、关系、观点或情感事实。"
             )
+        dialogue_rule = ""
+        if self.settings.owner_truth_memory_dialogue_enabled and normalized_scope == "personal":
+            from app.services.owner_truth_memory_dialogue import memory_dialogue_rule
+            dialogue_rule = memory_dialogue_rule(memory_retrieval_status, normalized_query)
+            if not memory_required:
+                role_rule = (
+                    "你是用户自己的寻梦环游 AI 助手，不得冒充用户本人。"
+                    "自然回应用户当前表达；有相关已授权记忆时可以联系旧事。"
+                    "本轮不是要求你凭空补出用户的历史；不得因记忆不足拒绝当前自述或公共问题。"
+                    "不得输出<MEMORY_GAP>；不得将本轮自述冒充已确认的正式记忆。"
+                )
         repair_rule = (
             f"上一次回答错误输出了{self.memory_gap_marker}。本次必须重新回答，禁止重复该标记或任何记忆不足话术。"
             if open_domain_repair and not memory_required
@@ -2323,6 +2331,7 @@ class DeepSeekEchoAnswerProxy:
             "最近对话只用于理解本轮代词、省略和话题延续，不是已确认的正式记忆，"
             "不得用它补写用户或家人的历史、身份、关系、观点和情感事实。"
             "回答控制在 220 个汉字以内。不要输出 JSON、Markdown 标题或来源编号。"
+            f"{dialogue_rule}"
         )
         memory_text = normalized_context or "（当前没有可用于回答的已授权记忆）"
         recent_turns_text = (
@@ -2374,6 +2383,7 @@ class DeepSeekEchoAnswerProxy:
         open_domain_repair: bool = False,
         time_zone: str = "UTC",
         public_information: Optional[PublicSearchResult] = None,
+        memory_retrieval_status: str = "unknown",
     ) -> str:
         if not self.settings.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is not configured")
@@ -2387,6 +2397,7 @@ class DeepSeekEchoAnswerProxy:
             open_domain_repair=open_domain_repair,
             time_zone=time_zone,
             public_information=public_information,
+            memory_retrieval_status=memory_retrieval_status,
         )
         with httpx.Client(timeout=45) as client:
             response = client.post(

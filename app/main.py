@@ -17743,6 +17743,8 @@ def _build_authorized_realtime_live_session(
         "personaScope": "family" if persona_scope == "family" else "personal",
         "snapshot": snapshot,
         "sessionContext": {
+            "contextUpdateVersion": (1 if persona_scope in {"personal", "self"}
+                and payload.get("supportsLiveContextUpdateV1") is True else 0),
             "systemRole": _REALTIME_LIVE_SYSTEM_ROLE,
             "speakingStyle": _REALTIME_LIVE_SPEAKING_STYLE,
             "providerRoleText": snapshot["providerRoleText"],
@@ -17824,6 +17826,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         retrieval_query = resolve_owner_truth_retrieval_query(
             query=query,
             recent_turns=text_conversation_context.prompt_turns,
+            memory_dialogue_enabled=settings.owner_truth_memory_dialogue_enabled,
         ).retrieval_query
     packet, owner_truth_audit_context, owner_truth_materialization = (
         _build_authorized_echo_context(
@@ -17858,6 +17861,9 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         (persona_scope == "family" and not is_explicit_public_query(query) and not explicit_public_search)
         or DeepSeekEchoAnswerProxy.requires_authorized_personal_memory(query)
     )
+    if settings.owner_truth_memory_dialogue_enabled and persona_scope == "personal":
+        from app.services.owner_truth_memory_dialogue import asks_for_saved_memory
+        requires_authorized_memory = requires_authorized_memory or asks_for_saved_memory(query)
     context_authority = packet.get("contextAuthority") if isinstance(packet, dict) else None
     owner_truth_query_gap = bool(
         isinstance(context_authority, dict)
@@ -17875,8 +17881,19 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
         else ""
     ).strip() or "ownerTruthRetrievalUnavailable"
 
+    dialogue_enabled = bool(
+        settings.owner_truth_memory_dialogue_enabled
+        and persona_scope == "personal"
+        and isinstance(context_authority, dict)
+        and context_authority.get("mode") == "ownerTruthConfirmedProjection"
+    )
+    dialogue_kwargs = (
+        {"memory_retrieval_status": context_authority.get("retrievalOutcome", "unknown")}
+        if dialogue_enabled else {}
+    )
+
     public_information = PublicSearchResult("notRequested")
-    if (provider_effects_allowed and not owner_truth_retrieval_fallback
+    if (provider_effects_allowed and (not owner_truth_retrieval_fallback or dialogue_enabled)
             and not requires_authorized_memory and settings.echo_public_search_enabled):
         # Authorized route only; never pass memory or recent turns into search.
         search_started_at = time.monotonic()
@@ -17895,7 +17912,8 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 public_information.queried_at, len(public_information.sources), public_information.request_id,
             )
 
-    if provider_effects_allowed and owner_truth_retrieval_fallback:
+    if (provider_effects_allowed and owner_truth_retrieval_fallback
+            and (not dialogue_enabled or requires_authorized_memory)):
         answer_text = "记忆检索服务暂时无法检索已确认的正式记忆，请稍后重试。"
         provider = "owner-truth-grounding-policy"
         fallback_reason = owner_truth_retrieval_fallback_reason
@@ -17933,6 +17951,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                 requires_authorized_memory=requires_authorized_memory,
                 time_zone=request.headers.get(TIME_ZONE_HEADER, "UTC"),
                 public_information=public_information,
+                **dialogue_kwargs,
             )
             _record_provider_cost_attempt(
                 request,
@@ -17961,6 +17980,7 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
                     open_domain_repair=True,
                     time_zone=request.headers.get(TIME_ZONE_HEADER, "UTC"),
                     public_information=public_information,
+                    **dialogue_kwargs,
                 )
                 _record_provider_cost_attempt(
                     request,
@@ -18215,6 +18235,64 @@ def realtime_token(request: Request, payload: Dict[str, Any]) -> JSONResponse:
         ) from exc
     _log_voice_launch_stage(request, "ticketResponsePrepared", started_at)
     return JSONResponse(content=response, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/voice/realtime-context")
+def realtime_context(request: Request, payload: Dict[str, Any]) -> JSONResponse:
+    from app.services.realtime_voice_context import (
+        LIVE_MEMORY_DIALOGUE_RULE, RealtimeContextError, issue_context_grant,
+    )
+    started = time.perf_counter()
+    user_id, payload = _principal_owned_payload(request, payload)
+    if not settings.owner_truth_live_context_update_enabled:
+        raise HTTPException(status_code=404, detail={"code": "realtimeContextUnavailable"})
+    ticket_id = payload.get("ticketId")
+    query = payload.get("query")
+    previous_hash = payload.get("previousHash")
+    sequence = payload.get("sequence")
+    if (not isinstance(ticket_id, str) or len(ticket_id) > 128
+            or not isinstance(query, str) or not 1 <= len(query.strip()) <= 512
+            or not isinstance(previous_hash, str) or len(previous_hash) != 71
+            or type(sequence) is not int or not 1 <= sequence <= 128):
+        raise HTTPException(status_code=400, detail={"code": "realtimeContextRequestInvalid"})
+    broker = RealtimeVoiceSessionBroker(settings, store)
+    lease = store.get_active_realtime_voice_session_ticket(ticket_id, user_id)
+    if (not lease or not lease.get("contextUpdateKey") or lease.get("personaScope") != "personal"
+            or lease.get("targetPersonaId") != user_id or not broker.is_lease_authorized(lease)):
+        raise HTTPException(status_code=409, detail={"code": "realtimeContextLeaseUnavailable"})
+    context = OwnerTruthCommandContext(vault_id=user_id, owner_subject_id=user_id, actor_subject_id=user_id)
+    material = OwnerTruthContextAuthorityService(store, settings=settings, enabled=True).materialize(
+        context=context, payload={"query": query.strip(), "intent": "echo_chat"},
+    )
+    authority = material.get("authority") or {}
+    if (material.get("state") != "ready" or authority.get("projectionCheckpoint") != lease["projectionCheckpoint"]
+            or authority.get("authorityEpoch") != lease["authorityEpoch"]
+            or (material.get("retrieval") or {}).get("outcome") not in {"grounded", "gap"}):
+        raise HTTPException(status_code=409, detail={"code": "realtimeContextReadUnavailable"})
+    snapshot = FormalMemoryConversationSnapshotService(store).build(context=context, persona_scope="personal")
+    if any(snapshot.get(field) != lease.get(field) for field in ("projectionCheckpoint", "authorityEpoch", "memoryRevision")):
+        raise HTTPException(status_code=409, detail={"code": "realtimeContextRevisionChanged"})
+    selected_ids = {item["memoryVersionId"] for item in material.get("typedCitations", [])}
+    snapshot["coreFacts"] = [fact for fact in snapshot["coreFacts"]
+                             if set(fact.get("sourceMemoryVersionIds", [])) & selected_ids]
+    snapshot = bind_provider_role_text(
+        snapshot, system_role=_REALTIME_LIVE_SYSTEM_ROLE + LIVE_MEMORY_DIALOGUE_RULE
+            + (LIVE_SEARCH_RULE if live_search_configured(settings) else ""),
+        speaking_style=_REALTIME_LIVE_SPEAKING_STYLE,
+        max_chars=settings.realtime_voice_snapshot_max_chars,
+        max_bytes=settings.realtime_voice_system_role_max_bytes,
+        clock_context=clock_context(request.headers.get(TIME_ZONE_HEADER, "UTC"), live=True),
+    )
+    if not broker.is_lease_authorized(lease):
+        raise HTTPException(status_code=409, detail={"code": "realtimeContextRevisionChanged"})
+    if time.perf_counter() - started > 0.5:
+        raise HTTPException(status_code=503, detail={"code": "realtimeContextReadDeadline"})
+    try:
+        grant = issue_context_grant(lease, role=snapshot["providerRoleText"],
+                                    previous_hash=previous_hash, sequence=sequence)
+    except RealtimeContextError as exc:
+        raise HTTPException(status_code=400, detail={"code": "realtimeContextRequestInvalid"}) from exc
+    return JSONResponse(content=grant, headers={"Cache-Control": "no-store"})
 
 
 @app.websocket("/voice/realtime-stream")

@@ -1,0 +1,961 @@
+[
+  {
+    "case": "reading-old",
+    "input": "2017年，我喜欢阅读科幻小说。",
+    "raw": [
+      {
+        "id": "b2bc9bad-e3d9-4339-a42f-52923cd9ff01",
+        "object": "chat.completion",
+        "created": 1791520886,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "{\n  \"memories\": [\n    {\n      \"memoryKind\": \"experience\",\n      \"content\": {\n        \"event\": \"我喜欢阅读科幻小说\",\n        \"time\": {\n          \"start\": null,\n          \"end\": null,\n          \"precision\": \"unknown\"\n        },\n        \"location\": null,\n        \"participants\": [],\n        \"actions\": [],\n        \"outcome\": null,\n        \"factType\": \"preference\",\n        \"dimensions\": [],\n        \"predicate\": \"喜欢阅读\",\n        \"object\": \"科幻小说\",\n        \"qualifiers\": {\n          \"polarity\": \"positive\",\n          \"strengthExpression\": \"喜欢\",\n          \"superlativeAsserted\": false,\n          \"currentApplicability\": \"historical\",\n          \"validTime\": {\n            \"start\": null,\n            \"end\": null,\n            \"precision\": \"unknown\",\n            \"expression\": \"2017年\"\n          },\n          \"place\": null,\n          \"scenario\": null\n        },\n        \"facets\": {\n          \"people\": [],\n          \"time\": [\n            {\n              \"value\": \"2017年\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"places\": [],\n          \"relationships\": [],\n          \"emotions\": [],\n          \"values\": [],\n          \"personality\": [],\n          \"habits\": [],\n          \"goals\": [],\n          \"identity\": [],\n          \"reflections\": [],\n          \"confidence\": 0.9\n        }\n      }\n    }\n  ]\n}"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1285,
+          "completion_tokens": 325,
+          "total_tokens": 1610,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 1285
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    ],
+    "normalized": {
+      "memories": [
+        {
+          "memoryKind": "experience",
+          "content": {
+            "event": "我喜欢阅读科幻小说",
+            "time": {
+              "start": null,
+              "end": null,
+              "precision": "unknown"
+            },
+            "location": null,
+            "participants": [],
+            "actions": [],
+            "outcome": null,
+            "factType": "preference",
+            "dimensions": [
+              "lifeEvents",
+              "preferences"
+            ],
+            "predicate": "喜欢阅读",
+            "object": {
+              "entityId": null,
+              "label": "科幻小说",
+              "category": null
+            },
+            "qualifiers": {
+              "polarity": "positive",
+              "strengthExpression": "喜欢",
+              "superlativeAsserted": false,
+              "currentApplicability": "historical",
+              "validTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown",
+                "expression": "2017年"
+              },
+              "place": null,
+              "scenario": null
+            },
+            "facets": {
+              "people": [],
+              "time": [
+                {
+                  "value": "2017年",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "places": [],
+              "relationships": [],
+              "emotions": [],
+              "values": [],
+              "personality": [],
+              "habits": [],
+              "goals": [],
+              "identity": [],
+              "reflections": [],
+              "confidence": 0.9
+            },
+            "semantic": {
+              "primaryKind": "lifeEvent",
+              "facets": [
+                "lifeEvent"
+              ],
+              "title": "我喜欢阅读科幻小说",
+              "narrative": "我喜欢阅读科幻小说",
+              "eventTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown"
+              },
+              "entities": [],
+              "emotionEvidence": []
+            },
+            "statement": "我喜欢阅读科幻小说",
+            "affect": null,
+            "provenance": {
+              "mode": "unknown",
+              "speakerPersonId": null,
+              "contributorAccountId": null,
+              "evidenceRefs": []
+            },
+            "memorySubjectId": null,
+            "claimSubjectId": null
+          }
+        }
+      ]
+    },
+    "elapsed": 1.2310001738369465,
+    "checks": {
+      "requiredTermsRetained": false,
+      "compatibleDuplicatePairs": [],
+      "maximumCandidates": 1
+    },
+    "status": "FAIL",
+    "promptVersion": "owner-truth-text-memory-organization-v6"
+  },
+  {
+    "case": "reading-new",
+    "input": "2024年，我喜欢阅读科幻小说。",
+    "raw": [
+      {
+        "id": "eeb1529e-73b6-4527-bff8-8461d97400da",
+        "object": "chat.completion",
+        "created": 1791520887,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "{\"memories\":[{\"memoryKind\":\"knowledge\",\"content\":{\"statement\":\"2024年，我喜欢阅读科幻小说。\",\"knowledgeType\":\"personal_experience\",\"domains\":[],\"applicability\":null,\"exceptions\":[],\"learnedFrom\":null,\"factType\":\"preference\",\"dimensions\":[\"preference\"],\"predicate\":\"喜欢阅读\",\"object\":\"科幻小说\",\"qualifiers\":{\"polarity\":\"positive\",\"strengthExpression\":\"喜欢\",\"superlativeAsserted\":false,\"currentApplicability\":\"historical\",\"validTime\":{\"start\":null,\"end\":null,\"precision\":\"year\",\"expression\":\"2024年\"},\"place\":null,\"scenario\":null},\"facets\":{\"people\":[],\"time\":[{\"value\":\"2024年\",\"evidenceMode\":\"ownerStated\",\"confidence\":1.0}],\"places\":[],\"relationships\":[],\"emotions\":[],\"values\":[],\"personality\":[],\"habits\":[],\"goals\":[],\"identity\":[],\"reflections\":[],\"confidence\":0.9}}}]}"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1285,
+          "completion_tokens": 217,
+          "total_tokens": 1502,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 1285
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    ],
+    "normalized": {
+      "memories": [
+        {
+          "memoryKind": "knowledge",
+          "content": {
+            "statement": "2024年，我喜欢阅读科幻小说。",
+            "knowledgeType": "personal_experience",
+            "domains": [],
+            "applicability": null,
+            "exceptions": [],
+            "learnedFrom": null,
+            "factType": "preference",
+            "dimensions": [
+              "knowledgeSkills",
+              "preferences"
+            ],
+            "predicate": "喜欢阅读",
+            "object": {
+              "entityId": null,
+              "label": "科幻小说",
+              "category": null
+            },
+            "qualifiers": {
+              "polarity": "positive",
+              "strengthExpression": "喜欢",
+              "superlativeAsserted": false,
+              "currentApplicability": "historical",
+              "validTime": {
+                "start": null,
+                "end": null,
+                "precision": "year",
+                "expression": "2024年"
+              },
+              "place": null,
+              "scenario": null
+            },
+            "facets": {
+              "people": [],
+              "time": [
+                {
+                  "value": "2024年",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "places": [],
+              "relationships": [],
+              "emotions": [],
+              "values": [],
+              "personality": [],
+              "habits": [],
+              "goals": [],
+              "identity": [],
+              "reflections": [],
+              "confidence": 0.9
+            },
+            "semantic": {
+              "primaryKind": "knowledge",
+              "facets": [
+                "knowledge"
+              ],
+              "title": "2024年，我喜欢阅读科幻小说",
+              "narrative": "2024年，我喜欢阅读科幻小说。",
+              "eventTime": null,
+              "entities": [],
+              "emotionEvidence": []
+            },
+            "affect": null,
+            "provenance": {
+              "mode": "unknown",
+              "speakerPersonId": null,
+              "contributorAccountId": null,
+              "evidenceRefs": []
+            },
+            "memorySubjectId": null,
+            "claimSubjectId": null
+          }
+        }
+      ]
+    },
+    "elapsed": 1.4784935768693686,
+    "checks": {
+      "requiredTermsRetained": true,
+      "compatibleDuplicatePairs": [],
+      "maximumCandidates": 1
+    },
+    "status": "PASS",
+    "promptVersion": "owner-truth-text-memory-organization-v6"
+  },
+  {
+    "case": "calligraphy",
+    "input": "我每周三晚上在家练习书法。",
+    "raw": [
+      {
+        "id": "90468fbb-5589-4f82-afe3-3c35984b18de",
+        "object": "chat.completion",
+        "created": 1791520888,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "{\n  \"memories\": [\n    {\n      \"memoryKind\": \"experience\",\n      \"content\": {\n        \"event\": \"每周三晚上在家练习书法\",\n        \"time\": {\n          \"start\": null,\n          \"end\": null,\n          \"precision\": \"unknown\"\n        },\n        \"location\": \"家\",\n        \"participants\": [],\n        \"actions\": [\n          \"练习书法\"\n        ],\n        \"outcome\": null,\n        \"factType\": \"habit\",\n        \"dimensions\": [\n          \"habit\",\n          \"time\",\n          \"place\"\n        ],\n        \"predicate\": \"练习\",\n        \"object\": \"书法\",\n        \"qualifiers\": {\n          \"polarity\": \"neutral\",\n          \"strengthExpression\": null,\n          \"superlativeAsserted\": false,\n          \"currentApplicability\": \"current\",\n          \"validTime\": {\n            \"start\": null,\n            \"end\": null,\n            \"precision\": \"unknown\",\n            \"expression\": \"每周三晚上\"\n          },\n          \"place\": \"家\",\n          \"scenario\": null\n        },\n        \"facets\": {\n          \"people\": [],\n          \"time\": [\n            {\n              \"value\": \"每周三晚上\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"places\": [\n            {\n              \"value\": \"家\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"relationships\": [],\n          \"emotions\": [],\n          \"values\": [],\n          \"personality\": [],\n          \"habits\": [\n            {\n              \"value\": \"每周三晚上在家练习书法\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"goals\": [],\n          \"identity\": [],\n          \"reflections\": [],\n          \"confidence\": 0.9\n        }\n      }\n    }\n  ]\n}"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1284,
+          "completion_tokens": 415,
+          "total_tokens": 1699,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 1284
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    ],
+    "normalized": {
+      "memories": [
+        {
+          "memoryKind": "experience",
+          "content": {
+            "event": "每周三晚上在家练习书法",
+            "time": {
+              "start": null,
+              "end": null,
+              "precision": "unknown"
+            },
+            "location": "家",
+            "participants": [],
+            "actions": [
+              "练习书法"
+            ],
+            "outcome": null,
+            "factType": "habit",
+            "dimensions": [
+              "lifeEvents",
+              "habits"
+            ],
+            "predicate": "练习",
+            "object": {
+              "entityId": null,
+              "label": "书法",
+              "category": null
+            },
+            "qualifiers": {
+              "polarity": "neutral",
+              "strengthExpression": null,
+              "superlativeAsserted": false,
+              "currentApplicability": "current",
+              "validTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown",
+                "expression": "每周三晚上"
+              },
+              "place": {
+                "entityId": null,
+                "label": "家",
+                "category": null
+              },
+              "scenario": null
+            },
+            "facets": {
+              "people": [],
+              "time": [
+                {
+                  "value": "每周三晚上",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "places": [
+                {
+                  "value": "家",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "relationships": [],
+              "emotions": [],
+              "values": [],
+              "personality": [],
+              "habits": [
+                {
+                  "value": "每周三晚上在家练习书法",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "goals": [],
+              "identity": [],
+              "reflections": [],
+              "confidence": 0.9
+            },
+            "semantic": {
+              "primaryKind": "lifeEvent",
+              "facets": [
+                "lifeEvent",
+                "habit"
+              ],
+              "title": "每周三晚上在家练习书法",
+              "narrative": "每周三晚上在家练习书法",
+              "eventTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown"
+              },
+              "entities": [
+                {
+                  "entityType": "place",
+                  "name": "家",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "emotionEvidence": []
+            },
+            "statement": "每周三晚上在家练习书法",
+            "affect": null,
+            "provenance": {
+              "mode": "unknown",
+              "speakerPersonId": null,
+              "contributorAccountId": null,
+              "evidenceRefs": []
+            },
+            "memorySubjectId": null,
+            "claimSubjectId": null
+          }
+        }
+      ]
+    },
+    "elapsed": 1.7772451229393482,
+    "checks": {
+      "requiredTermsRetained": true,
+      "compatibleDuplicatePairs": [],
+      "maximumCandidates": 1
+    },
+    "status": "PASS",
+    "promptVersion": "owner-truth-text-memory-organization-v6"
+  },
+  {
+    "case": "negative",
+    "input": "我不喜欢吃香菜。",
+    "raw": [
+      {
+        "id": "32b435de-24e5-456f-b864-ecfddb33d09f",
+        "object": "chat.completion",
+        "created": 1791520890,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "{\n  \"memories\": [\n    {\n      \"memoryKind\": \"knowledge\",\n      \"content\": {\n        \"statement\": \"我不喜欢吃香菜。\",\n        \"knowledgeType\": \"personal_experience\",\n        \"domains\": [],\n        \"applicability\": null,\n        \"exceptions\": [],\n        \"learnedFrom\": null,\n        \"factType\": \"preference\",\n        \"dimensions\": [\"food_preference\"],\n        \"predicate\": \"不喜欢吃\",\n        \"object\": \"香菜\",\n        \"qualifiers\": {\n          \"polarity\": \"negative\",\n          \"strengthExpression\": null,\n          \"superlativeAsserted\": false,\n          \"currentApplicability\": \"current\",\n          \"validTime\": {\"start\": null, \"end\": null, \"precision\": \"unknown\", \"expression\": null},\n          \"place\": null,\n          \"scenario\": null\n        },\n        \"facets\": {\n          \"people\": [],\n          \"time\": [],\n          \"places\": [],\n          \"relationships\": [],\n          \"emotions\": [],\n          \"values\": [],\n          \"personality\": [],\n          \"habits\": [],\n          \"goals\": [],\n          \"identity\": [],\n          \"reflections\": [],\n          \"confidence\": 0.9\n        }\n      }\n    }\n  ]\n}"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1280,
+          "completion_tokens": 271,
+          "total_tokens": 1551,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 1280
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    ],
+    "normalized": {
+      "memories": [
+        {
+          "memoryKind": "knowledge",
+          "content": {
+            "statement": "我不喜欢吃香菜。",
+            "knowledgeType": "personal_experience",
+            "domains": [],
+            "applicability": null,
+            "exceptions": [],
+            "learnedFrom": null,
+            "factType": "preference",
+            "dimensions": [
+              "knowledgeSkills",
+              "preferences"
+            ],
+            "predicate": "不喜欢吃",
+            "object": {
+              "entityId": null,
+              "label": "香菜",
+              "category": null
+            },
+            "qualifiers": {
+              "polarity": "negative",
+              "strengthExpression": null,
+              "superlativeAsserted": false,
+              "currentApplicability": "current",
+              "validTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown",
+                "expression": null
+              },
+              "place": null,
+              "scenario": null
+            },
+            "facets": {
+              "people": [],
+              "time": [],
+              "places": [],
+              "relationships": [],
+              "emotions": [],
+              "values": [],
+              "personality": [],
+              "habits": [],
+              "goals": [],
+              "identity": [],
+              "reflections": [],
+              "confidence": 0.9
+            },
+            "semantic": {
+              "primaryKind": "knowledge",
+              "facets": [
+                "knowledge"
+              ],
+              "title": "我不喜欢吃香菜",
+              "narrative": "我不喜欢吃香菜。",
+              "eventTime": null,
+              "entities": [],
+              "emotionEvidence": []
+            },
+            "affect": null,
+            "provenance": {
+              "mode": "unknown",
+              "speakerPersonId": null,
+              "contributorAccountId": null,
+              "evidenceRefs": []
+            },
+            "memorySubjectId": null,
+            "claimSubjectId": null
+          }
+        }
+      ]
+    },
+    "elapsed": 1.110252633690834,
+    "checks": {
+      "requiredTermsRetained": true,
+      "compatibleDuplicatePairs": [],
+      "maximumCandidates": 1
+    },
+    "status": "PASS",
+    "promptVersion": "owner-truth-text-memory-organization-v6"
+  },
+  {
+    "case": "goal",
+    "input": "我明确把明年学习陶艺作为当前目标，还没有开始学习。",
+    "raw": [
+      {
+        "id": "6504ce29-d649-45bb-99d8-997500d21e88",
+        "object": "chat.completion",
+        "created": 1791520891,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "{\n  \"memories\": [\n    {\n      \"memoryKind\": \"knowledge\",\n      \"content\": {\n        \"statement\": \"我明确把明年学习陶艺作为当前目标，还没有开始学习。\",\n        \"knowledgeType\": \"personal_experience\",\n        \"domains\": [],\n        \"applicability\": null,\n        \"exceptions\": [],\n        \"learnedFrom\": null,\n        \"factType\": \"goal\",\n        \"dimensions\": [],\n        \"predicate\": \"把明年学习陶艺作为当前目标\",\n        \"object\": \"学习陶艺\",\n        \"qualifiers\": {\n          \"polarity\": \"positive\",\n          \"strengthExpression\": \"明确\",\n          \"superlativeAsserted\": false,\n          \"currentApplicability\": \"current\",\n          \"validTime\": {\n            \"start\": null,\n            \"end\": null,\n            \"precision\": \"unknown\",\n            \"expression\": \"明年\"\n          },\n          \"place\": null,\n          \"scenario\": null\n        },\n        \"facets\": {\n          \"people\": [],\n          \"time\": [\n            {\n              \"value\": \"明年\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"places\": [],\n          \"relationships\": [],\n          \"emotions\": [],\n          \"values\": [],\n          \"personality\": [],\n          \"habits\": [],\n          \"goals\": [\n            {\n              \"value\": \"把明年学习陶艺作为当前目标\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"identity\": [],\n          \"reflections\": [],\n          \"confidence\": 0.9\n        }\n      }\n    },\n    {\n      \"memoryKind\": \"knowledge\",\n      \"content\": {\n        \"statement\": \"还没有开始学习。\",\n        \"knowledgeType\": \"personal_experience\",\n        \"domains\": [],\n        \"applicability\": null,\n        \"exceptions\": [],\n        \"learnedFrom\": null,\n        \"factType\": \"attribute\",\n        \"dimensions\": [],\n        \"predicate\": \"还没有开始学习\",\n        \"object\": \"学习\",\n        \"qualifiers\": {\n          \"polarity\": \"negative\",\n          \"strengthExpression\": null,\n          \"superlativeAsserted\": false,\n          \"currentApplicability\": \"current\",\n          \"validTime\": {\n            \"start\": null,\n            \"end\": null,\n            \"precision\": \"unknown\",\n            \"expression\": null\n          },\n          \"place\": null,\n          \"scenario\": null\n        },\n        \"facets\": {\n          \"people\": [],\n          \"time\": [],\n          \"places\": [],\n          \"relationships\": [],\n          \"emotions\": [],\n          \"values\": [],\n          \"personality\": [],\n          \"habits\": [],\n          \"goals\": [],\n          \"identity\": [],\n          \"reflections\": [],\n          \"confidence\": 0.9\n        }\n      }\n    }\n  ]\n}"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1291,
+          "completion_tokens": 629,
+          "total_tokens": 1920,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 1291
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    ],
+    "normalized": {
+      "memories": [
+        {
+          "memoryKind": "knowledge",
+          "content": {
+            "statement": "还没有开始学习。",
+            "knowledgeType": "personal_experience",
+            "domains": [],
+            "applicability": null,
+            "exceptions": [],
+            "learnedFrom": null,
+            "factType": "attribute",
+            "dimensions": [
+              "identity",
+              "knowledgeSkills"
+            ],
+            "predicate": "还没有开始学习",
+            "object": {
+              "entityId": null,
+              "label": "学习",
+              "category": null
+            },
+            "qualifiers": {
+              "polarity": "negative",
+              "strengthExpression": null,
+              "superlativeAsserted": false,
+              "currentApplicability": "current",
+              "validTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown",
+                "expression": null
+              },
+              "place": null,
+              "scenario": null
+            },
+            "facets": {
+              "people": [],
+              "time": [],
+              "places": [],
+              "relationships": [],
+              "emotions": [],
+              "values": [],
+              "personality": [],
+              "habits": [],
+              "goals": [],
+              "identity": [],
+              "reflections": [],
+              "confidence": 0.9
+            },
+            "semantic": {
+              "primaryKind": "knowledge",
+              "facets": [
+                "knowledge"
+              ],
+              "title": "还没有开始学习",
+              "narrative": "还没有开始学习。",
+              "eventTime": null,
+              "entities": [],
+              "emotionEvidence": []
+            },
+            "affect": null,
+            "provenance": {
+              "mode": "unknown",
+              "speakerPersonId": null,
+              "contributorAccountId": null,
+              "evidenceRefs": []
+            },
+            "memorySubjectId": null,
+            "claimSubjectId": null
+          }
+        },
+        {
+          "memoryKind": "knowledge",
+          "content": {
+            "statement": "我明确把明年学习陶艺作为当前目标，还没有开始学习。",
+            "knowledgeType": "personal_experience",
+            "domains": [],
+            "applicability": null,
+            "exceptions": [],
+            "learnedFrom": null,
+            "factType": "goal",
+            "dimensions": [
+              "knowledgeSkills",
+              "goals"
+            ],
+            "predicate": "把明年学习陶艺作为当前目标",
+            "object": {
+              "entityId": null,
+              "label": "学习陶艺",
+              "category": null
+            },
+            "qualifiers": {
+              "polarity": "positive",
+              "strengthExpression": "明确",
+              "superlativeAsserted": false,
+              "currentApplicability": "current",
+              "validTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown",
+                "expression": "明年"
+              },
+              "place": null,
+              "scenario": null
+            },
+            "facets": {
+              "people": [],
+              "time": [
+                {
+                  "value": "明年",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "places": [],
+              "relationships": [],
+              "emotions": [],
+              "values": [],
+              "personality": [],
+              "habits": [],
+              "goals": [
+                {
+                  "value": "把明年学习陶艺作为当前目标",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "identity": [],
+              "reflections": [],
+              "confidence": 0.9
+            },
+            "semantic": {
+              "primaryKind": "knowledge",
+              "facets": [
+                "knowledge",
+                "goal"
+              ],
+              "title": "我明确把明年学习陶艺作为当前目标，还没有开始学习",
+              "narrative": "我明确把明年学习陶艺作为当前目标，还没有开始学习。",
+              "eventTime": null,
+              "entities": [],
+              "emotionEvidence": []
+            },
+            "affect": null,
+            "provenance": {
+              "mode": "unknown",
+              "speakerPersonId": null,
+              "contributorAccountId": null,
+              "evidenceRefs": []
+            },
+            "memorySubjectId": null,
+            "claimSubjectId": null
+          }
+        }
+      ]
+    },
+    "elapsed": 2.214623611420393,
+    "checks": {
+      "requiredTermsRetained": true,
+      "compatibleDuplicatePairs": [],
+      "maximumCandidates": 1
+    },
+    "status": "FAIL",
+    "promptVersion": "owner-truth-text-memory-organization-v6"
+  },
+  {
+    "case": "emotion",
+    "input": "我周末整理照片时觉得很放松。",
+    "raw": [
+      {
+        "id": "94ee5acb-f57c-4758-9a4b-450c7182c230",
+        "object": "chat.completion",
+        "created": 1791520893,
+        "model": "deepseek-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "{\n  \"memories\": [\n    {\n      \"memoryKind\": \"experience\",\n      \"content\": {\n        \"event\": \"我周末整理照片时觉得很放松。\",\n        \"time\": {\n          \"start\": null,\n          \"end\": null,\n          \"precision\": \"unknown\"\n        },\n        \"location\": null,\n        \"participants\": [],\n        \"actions\": [],\n        \"outcome\": null,\n        \"factType\": \"event\",\n        \"dimensions\": [],\n        \"predicate\": \"整理照片\",\n        \"object\": null,\n        \"qualifiers\": {\n          \"polarity\": \"positive\",\n          \"strengthExpression\": \"很\",\n          \"superlativeAsserted\": false,\n          \"currentApplicability\": \"historical\",\n          \"validTime\": {\n            \"start\": null,\n            \"end\": null,\n            \"precision\": \"unknown\",\n            \"expression\": \"周末\"\n          },\n          \"place\": null,\n          \"scenario\": null\n        },\n        \"facets\": {\n          \"people\": [],\n          \"time\": [\n            {\n              \"value\": \"周末\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"places\": [],\n          \"relationships\": [],\n          \"emotions\": [\n            {\n              \"value\": \"很放松\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"values\": [],\n          \"personality\": [],\n          \"habits\": [],\n          \"goals\": [],\n          \"identity\": [],\n          \"reflections\": [],\n          \"confidence\": 0.9\n        }\n      }\n    },\n    {\n      \"memoryKind\": \"emotion\",\n      \"content\": {\n        \"emotion\": \"放松\",\n        \"expression\": \"我周末整理照片时觉得很放松。\",\n        \"trigger\": \"整理照片\",\n        \"targetPersonaId\": null,\n        \"time\": null,\n        \"intensity\": \"很\",\n        \"factType\": \"affect\",\n        \"dimensions\": [],\n        \"predicate\": \"觉得\",\n        \"object\": \"很放松\",\n        \"qualifiers\": {\n          \"polarity\": \"positive\",\n          \"strengthExpression\": \"很\",\n          \"superlativeAsserted\": false,\n          \"currentApplicability\": \"historical\",\n          \"validTime\": {\n            \"start\": null,\n            \"end\": null,\n            \"precision\": \"unknown\",\n            \"expression\": \"周末\"\n          },\n          \"place\": null,\n          \"scenario\": null\n        },\n        \"affect\": {\n          \"experiencer\": null,\n          \"target\": null,\n          \"trigger\": \"整理照片\",\n          \"emotionExpression\": \"我周末整理照片时觉得很放松。\",\n          \"reporter\": null\n        },\n        \"facets\": {\n          \"people\": [],\n          \"time\": [\n            {\n              \"value\": \"周末\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"places\": [],\n          \"relationships\": [],\n          \"emotions\": [\n            {\n              \"value\": \"很放松\",\n              \"evidenceMode\": \"ownerStated\",\n              \"confidence\": 1.0\n            }\n          ],\n          \"values\": [],\n          \"personality\": [],\n          \"habits\": [],\n          \"goals\": [],\n          \"identity\": [],\n          \"reflections\": [],\n          \"confidence\": 0.9\n        }\n      }\n    }\n  ]\n}"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1284,
+          "completion_tokens": 745,
+          "total_tokens": 2029,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 1284
+        },
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+      }
+    ],
+    "normalized": {
+      "memories": [
+        {
+          "memoryKind": "experience",
+          "content": {
+            "event": "我周末整理照片时觉得很放松。",
+            "time": {
+              "start": null,
+              "end": null,
+              "precision": "unknown"
+            },
+            "location": null,
+            "participants": [],
+            "actions": [],
+            "outcome": null,
+            "factType": "event",
+            "dimensions": [
+              "lifeEvents",
+              "emotions"
+            ],
+            "predicate": "整理照片",
+            "object": null,
+            "qualifiers": {
+              "polarity": "positive",
+              "strengthExpression": "很",
+              "superlativeAsserted": false,
+              "currentApplicability": "historical",
+              "validTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown",
+                "expression": "周末"
+              },
+              "place": null,
+              "scenario": null
+            },
+            "facets": {
+              "people": [],
+              "time": [
+                {
+                  "value": "周末",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "places": [],
+              "relationships": [],
+              "emotions": [
+                {
+                  "value": "很放松",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "values": [],
+              "personality": [],
+              "habits": [],
+              "goals": [],
+              "identity": [],
+              "reflections": [],
+              "confidence": 0.9
+            },
+            "semantic": {
+              "primaryKind": "lifeEvent",
+              "facets": [
+                "lifeEvent",
+                "emotion"
+              ],
+              "title": "我周末整理照片时觉得很放松",
+              "narrative": "我周末整理照片时觉得很放松。",
+              "eventTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown"
+              },
+              "entities": [],
+              "emotionEvidence": [
+                {
+                  "emotion": "很放松",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ]
+            },
+            "statement": "我周末整理照片时觉得很放松。",
+            "affect": null,
+            "provenance": {
+              "mode": "unknown",
+              "speakerPersonId": null,
+              "contributorAccountId": null,
+              "evidenceRefs": []
+            },
+            "memorySubjectId": null,
+            "claimSubjectId": null
+          }
+        },
+        {
+          "memoryKind": "emotion",
+          "content": {
+            "emotion": "放松",
+            "expression": "我周末整理照片时觉得很放松。",
+            "trigger": "整理照片",
+            "targetPersonaId": null,
+            "time": null,
+            "intensity": null,
+            "factType": "affect",
+            "dimensions": [
+              "emotions"
+            ],
+            "predicate": "觉得",
+            "object": {
+              "entityId": null,
+              "label": "很放松",
+              "category": null
+            },
+            "qualifiers": {
+              "polarity": "positive",
+              "strengthExpression": "很",
+              "superlativeAsserted": false,
+              "currentApplicability": "historical",
+              "validTime": {
+                "start": null,
+                "end": null,
+                "precision": "unknown",
+                "expression": "周末"
+              },
+              "place": null,
+              "scenario": null
+            },
+            "affect": {
+              "experiencer": null,
+              "target": null,
+              "trigger": "整理照片",
+              "emotionExpression": "我周末整理照片时觉得很放松。",
+              "reporter": null
+            },
+            "facets": {
+              "people": [],
+              "time": [
+                {
+                  "value": "周末",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "places": [],
+              "relationships": [],
+              "emotions": [
+                {
+                  "value": "很放松",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ],
+              "values": [],
+              "personality": [],
+              "habits": [],
+              "goals": [],
+              "identity": [],
+              "reflections": [],
+              "confidence": 0.9
+            },
+            "semantic": {
+              "primaryKind": "emotion",
+              "facets": [
+                "emotion"
+              ],
+              "title": "我周末整理照片时觉得很放松",
+              "narrative": "我周末整理照片时觉得很放松。",
+              "eventTime": null,
+              "entities": [],
+              "emotionEvidence": [
+                {
+                  "emotion": "很放松",
+                  "evidenceMode": "ownerStated",
+                  "confidence": 1.0
+                }
+              ]
+            },
+            "statement": "我周末整理照片时觉得很放松。",
+            "provenance": {
+              "mode": "unknown",
+              "speakerPersonId": null,
+              "contributorAccountId": null,
+              "evidenceRefs": []
+            },
+            "memorySubjectId": null,
+            "claimSubjectId": null
+          }
+        }
+      ]
+    },
+    "elapsed": 2.4539058841764927,
+    "checks": {
+      "requiredTermsRetained": true,
+      "compatibleDuplicatePairs": [],
+      "maximumCandidates": 2
+    },
+    "status": "PASS",
+    "promptVersion": "owner-truth-text-memory-organization-v6"
+  }
+]

@@ -55,6 +55,7 @@ def resolve_owner_truth_retrieval_query(
     *,
     query: str,
     recent_turns: Sequence[Mapping[str, Any]],
+    memory_dialogue_enabled: bool = False,
 ) -> OwnerTruthRetrievalQueryResolution:
     """Resolve a narrow follow-up reference from authenticated session history.
 
@@ -65,6 +66,14 @@ def resolve_owner_truth_retrieval_query(
     """
 
     normalized = " ".join(str(query or "").split())
+    if memory_dialogue_enabled:
+        from app.services.owner_truth_memory_dialogue import same_session_topic_cue
+        cue = same_session_topic_cue(normalized, recent_turns)
+        return OwnerTruthRetrievalQueryResolution(
+            retrieval_query=cue or normalized,
+            used_history=cue is not None,
+            source="sameProductSessionUserTurn" if cue else "currentQuery",
+        )
     if not normalized or not _FOLLOW_UP_REFERENCE.match(normalized):
         return OwnerTruthRetrievalQueryResolution(
             retrieval_query=normalized,

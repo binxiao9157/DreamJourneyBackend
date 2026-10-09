@@ -394,6 +394,16 @@ def main() -> int:
         )
         require(search_rebuild.projection is not None, "search projection must become ready")
 
+        # Formal confirmation and SearchDocuments are ready before vectors.
+        cold = OwnerTruthMemorySearchReadService(
+            store, hybrid_ranker=OwnerTruthMemorySearchHybridRanker(provider),
+        ).read(context=context, query="我从哪个学校毕业", limit=2)
+        require(any(hit.document.memory_version_id == old_school_version_id for hit in cold.hits),
+                "current formal fact must be found before any vector worker runs")
+        require(cold.retrieval_mode == "deterministicTextFallback",
+                "empty vector lane must not claim semantic contribution")
+        print(json.dumps({"coldIndexRecall": "PASS", "realModelEvidence": False}))
+
         worker_settings = replace(
             runtime_settings,
             store_backend="postgres",
@@ -460,6 +470,13 @@ def main() -> int:
         OwnerTruthMemoryProjectionService(store).rebuild(context=context)
         rebuilt = OwnerTruthMemorySearchDocumentProjectionService(store).rebuild(context=context)
         require(rebuilt.projection is not None, "revised formal fact must rebuild search projection")
+        revised_cold = OwnerTruthMemorySearchReadService(
+            store, hybrid_ranker=OwnerTruthMemorySearchHybridRanker(provider),
+        ).read(context=context, query="我从哪个学校毕业", limit=2)
+        require(any(hit.document.memory_version_id == new_school_version_id for hit in revised_cold.hits),
+                "new formal version must be recalled before replacement vectors are ready")
+        require(all(hit.document.memory_version_id != old_school_version_id for hit in revised_cold.hits),
+                "lexical continuity must never revive a superseded fact")
         recovered = OwnerTruthMemorySearchEmbeddingWorkerRuntime(
             settings=worker_settings,
             store=store,
@@ -502,6 +519,8 @@ def main() -> int:
             "hnswPlanned": True,
             "staleReadFailedClosed": True,
             "replacementOnly": True,
+            "coldIndexRecall": True,
+            "revisionBeforeEmbeddingRecall": True,
             "privateVaultRead": False,
             "credentialRetained": False,
         }
