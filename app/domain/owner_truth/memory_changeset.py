@@ -358,6 +358,36 @@ def _fact_shape_json(content: Mapping[str, Any]) -> str:
     return _canonical_json(copied)
 
 
+def _is_identical_assertion_with_unspecified_polarity(
+    *, candidate: Mapping[str, Any], target: Mapping[str, Any],
+) -> bool:
+    """An identical assertion may acquire a different extractor polarity tag.
+
+    This is deliberately stricter than paraphrase matching: only positive vs
+    unknown is tolerated, with identical text and every other business field.
+    Source-local turn indices and evidence refs do not change the assertion.
+    Keep provenance mode/identity, all scopes and reviewed semantics exact.
+    """
+    statement = candidate.get("statement")
+    if not isinstance(statement, str) or not statement.strip() or statement != target.get("statement"):
+        return False
+    if {_polarity(candidate), _polarity(target)} != {"positive", "unknown"}:
+        return False
+
+    def shape(content: Mapping[str, Any]) -> str:
+        copied = _copy_mapping(content, field="typed fact")
+        copied.pop("sourceTurnIndices", None)
+        provenance = copied.get("provenance")
+        if isinstance(provenance, dict):
+            provenance.pop("evidenceRefs", None)
+        qualifiers = copied.get("qualifiers")
+        if isinstance(qualifiers, dict):
+            qualifiers["polarity"] = "unknown"
+        return _canonical_json(copied)
+
+    return shape(candidate) == shape(target)
+
+
 def _semantic_value_is_unspecified(value: Any) -> bool:
     if value is None:
         return True
@@ -1266,6 +1296,19 @@ def build_memory_changeset(
                     target=target,
                     reason="polarityConflictsAtSameScope",
                     changed_fields=("qualifiers.polarity",),
+                    added_evidence_count=len(new_evidence),
+                )
+            elif _is_identical_assertion_with_unspecified_polarity(
+                candidate=candidate_content, target=target_content,
+            ):
+                operation = _operation(
+                    kind=(OwnerTruthMemoryChangeOperationKind.ADD_EVIDENCE
+                          if new_evidence else OwnerTruthMemoryChangeOperationKind.DUPLICATE),
+                    candidate=candidate,
+                    candidate_content=candidate_content,
+                    target=target,
+                    reason="identicalAssertionUnspecifiedPolarityPreservesReviewedFact",
+                    changed_fields=("evidenceRefs",) if new_evidence else (),
                     added_evidence_count=len(new_evidence),
                 )
             elif not new_evidence and _fact_shape_json(candidate_content) == _fact_shape_json(target_content):

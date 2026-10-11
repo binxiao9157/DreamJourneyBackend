@@ -184,6 +184,7 @@ class Settings:
     owner_truth_context_authority_enabled: bool = False
     owner_truth_live_context_update_enabled: bool = False
     owner_truth_memory_dialogue_enabled: bool = False
+    owner_truth_biography_topics_enabled: bool = False
     # Deprecated deployment alias retained while older environments migrate to
     # OWNER_TRUTH_CONTEXT_AUTHORITY_ENABLED.
     owner_truth_context_authority_closed_pilot_enabled: bool = False
@@ -788,6 +789,7 @@ class Settings:
             owner_truth_live_context_update_enabled=_env_bool(
                 "OWNER_TRUTH_LIVE_CONTEXT_UPDATE_ENABLED", False,
             ),
+            owner_truth_biography_topics_enabled=_env_bool("OWNER_TRUTH_BIOGRAPHY_TOPICS_ENABLED", False),
             owner_truth_memory_dialogue_enabled=_env_bool(
                 "OWNER_TRUTH_MEMORY_DIALOGUE_ENABLED", False,
             ),

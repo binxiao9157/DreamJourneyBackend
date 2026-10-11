@@ -8586,7 +8586,11 @@ def get_owner_truth_person_memory_profile(
 
     try:
         context = _owner_truth_formal_memory_context(request, vault_id=vault_id)
-        profile = OwnerTruthPersonMemoryProfileService(store).read(context=context)
+        from app.services.owner_truth_biography import biography_model_config
+        profile = OwnerTruthPersonMemoryProfileService(
+            store, biography_topics=settings.owner_truth_biography_topics_enabled,
+            composition_config=biography_model_config(settings),
+        ).read(context=context)
     except OwnerTruthFormalMemoryError as error:
         raise _owner_truth_formal_memory_http_error(error) from error
     return JSONResponse(

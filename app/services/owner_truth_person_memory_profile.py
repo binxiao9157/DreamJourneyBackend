@@ -19,6 +19,7 @@ from app.domain.owner_truth.person_memory_model import (
     PERSON_BIOGRAPHY_PROJECTION_SCHEMA_VERSION,
     PERSON_MEMORY_MODEL_ALGORITHM_VERSION,
     PERSON_MEMORY_MODEL_SCHEMA_VERSION,
+    PersonMemoryModelError,
     build_person_memory_model,
     build_person_memory_model_incremental,
 )
@@ -323,7 +324,10 @@ class _LifeStoryChapterGroup:
 class OwnerTruthPersonMemoryProfileService:
     """Build a bounded continuous-text life record from all current memories."""
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, *, biography_topics: bool = False, include_composition: bool = True, composition_config: str = "reviewed-polish-v2") -> None:
+        self._biography_topics = biography_topics
+        self._include_composition = include_composition
+        self._composition_config = composition_config
         self._store = store
         self._formal_memory = OwnerTruthFormalMemoryService(store)
         cache = getattr(store, "_owner_truth_person_memory_profile_cache", None)
@@ -339,7 +343,11 @@ class OwnerTruthPersonMemoryProfileService:
         if memories:
             require_owner_truth_derived_memory_access(store=self._store, context=context)
         entries = tuple(_person_model_entry(item) for item in memories)
+        bindings = self._confirmed_biography_bindings(context=context, entries=entries)
         source_fingerprint = _profile_source_fingerprint(entries)
+        from app.domain.owner_truth.person_biography import ALGORITHM, PROMPT_VERSION, MODEL_CONFIG_VERSION, digest
+        source_fingerprint = sha256((source_fingerprint + PERSON_MEMORY_MODEL_ALGORITHM_VERSION +
+            (ALGORITHM + PROMPT_VERSION + self._composition_config + digest(bindings) if self._biography_topics else "legacy")).encode()).hexdigest()
         cached = self._cache.get(
             vault_id=context.vault_id,
             owner_subject_id=context.owner_subject_id,
@@ -347,16 +355,16 @@ class OwnerTruthPersonMemoryProfileService:
         if cached is not None and cached.source_fingerprint == source_fingerprint:
             # Current rights were checked above. A byte-identical current fact
             # set needs no fresh full-document derivation.
-            return replace(
+            return self._with_composition(replace(
                 cached.profile,
                 derivation_state="ready",
                 stale_reason=None,
                 rebuild_mode="unchanged",
                 affected_dimensions=(),
-            )
+            ), context=context)
         try:
-            if cached is None:
-                memory_model = build_person_memory_model(entries)
+            if cached is None or bool(cached.profile.memory_model.get("biographyProjection", {}).get("algorithmVersion")) != self._biography_topics:
+                memory_model = build_person_memory_model(entries, biography_topics=self._biography_topics, biography_model_config=self._composition_config, biography_bindings=bindings)
                 rebuild_mode = "full"
             else:
                 # The source set is current formal authority, while the prior
@@ -367,6 +375,9 @@ class OwnerTruthPersonMemoryProfileService:
                 memory_model = build_person_memory_model_incremental(
                     previous_model=cached.profile.memory_model,
                     entries=entries,
+                    biography_topics=self._biography_topics,
+                    biography_model_config=self._composition_config,
+                    biography_bindings=bindings,
                 )
                 rebuild_mode = "incremental"
             dimensions = _dimensions_from_model(memory_model)
@@ -403,24 +414,43 @@ class OwnerTruthPersonMemoryProfileService:
                 rebuild_mode=rebuild_mode,
                 affected_dimensions=affected_dimensions,
             )
-        except OwnerTruthPersonMemoryProfileError:
-            if cached is None:
-                raise
-            # A failed derived rebuild must not masquerade as a current formal
-            # view. The last evidence-bound version remains marked stale.
-            return replace(
-                cached.profile,
-                derivation_state="stale",
-                stale_reason="derivationFailed",
-                rebuild_mode="staleFallback",
-                affected_dimensions=(),
+        except (OwnerTruthPersonMemoryProfileError, PersonMemoryModelError):
+            # A prior successful profile can contain revoked/corrected facts.
+            # Rebuild a faithful CURRENT view; never return the stale prose.
+            memory_model = build_person_memory_model(entries, biography_topics=self._biography_topics, biography_model_config=self._composition_config, biography_bindings=bindings)
+            life_story = _life_story_from_model(memory_model)
+            profile = OwnerTruthPersonMemoryProfile(
+                vault_id=context.vault_id, profile_version=str(memory_model["modelVersion"]),
+                updated_at=max((item.current_version.created_at for item in memories), default=None),
+                memory_count=len(memories), life_record=_life_record_from_story(life_story),
+                life_story=life_story, dimensions=_dimensions_from_model(memory_model),
+                memory_model=memory_model, source_fingerprint=source_fingerprint,
+                derivation_state="stale", stale_reason="derivationFailed", rebuild_mode="staleFallback",
             )
         self._cache.put(
             vault_id=context.vault_id,
             owner_subject_id=context.owner_subject_id,
             entry=_ProfileCacheEntry(source_fingerprint=source_fingerprint, profile=profile),
         )
-        return profile
+        return self._with_composition(profile, context=context)
+
+    def _confirmed_biography_bindings(self, *, context, entries):
+        factory = getattr(self._store, "owner_truth_biography_repository", None)
+        if not self._biography_topics or not entries or not callable(factory):
+            return {}
+        return factory().confirmed_topic_bindings(context=context, entries=entries)
+
+    def _with_composition(self, profile, *, context):
+        factory = getattr(self._store, "owner_truth_biography_repository", None)
+        if not self._biography_topics or not self._include_composition or not callable(factory):
+            return profile
+        # Reading does not enqueue, retry or call any provider. Missing tables
+        # are deployment errors, not a reason to return an old artifact.
+        from app.services.owner_truth_biography import read_composed_model
+        model = read_composed_model(factory(), context=context, model=profile.memory_model)
+        story = _life_story_from_model(model)
+        return replace(profile, memory_model=model, life_story=story,
+                       life_record=_life_record_from_story(story), profile_version=model["modelVersion"])
 
     def _all_current_memories(
         self,

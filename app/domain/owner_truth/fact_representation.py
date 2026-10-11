@@ -37,9 +37,16 @@ def _identity(content: Mapping[str, Any]) -> Any:
 def explicit_year(content: Mapping[str, Any]) -> str | None:
     t = (content.get("qualifiers") or {}).get("validTime") or {}
     year = str(t.get("expression") or "")
+    # A same-year start/end from this provider is a singleton only when the
+    # whole literal proves the bounded preference form. Never erase a cutoff
+    # or an interval merely because its two serialized endpoints are equal.
+    literal_singleton = re.fullmatch(re.escape(year) + r"[，,]?我喜欢喝[^，,。.!！？?；;]+", _text(content.get("statement")))
+    singleton_end = t.get("end") in (None, "") or (
+        t.get("start") == t.get("end") == year[:-1] and literal_singleton is not None
+    )
     if (not re.fullmatch(r"[1-9][0-9]{3}年", year)
             or t.get("precision") not in {"unknown", "year"}
-            or t.get("start") or t.get("end")
+            or t.get("start") not in (None, "", year[:-1]) or not singleton_end
             or re.findall(r"[1-9][0-9]{3}年", str(content.get("statement") or "")) != [year]):
         return None
     return year
@@ -52,8 +59,9 @@ def _business(content: Mapping[str, Any], *, omit_year: bool) -> dict:
     # evidence operations always preserve the entire reviewed target payload.
     for key in ("semantic", "facets", "dimensions", "provenance", "sourceTurnIndices"):
         c.pop(key, None)
-    if _text(c.get("event")) == statement:
-        c.pop("event", None)
+    for redundant in ("event", "summary"):
+        if _text(c.get(redundant)) == statement:
+            c.pop(redundant, None)
     if c.get("knowledgeType") in {"personal_experience", "personal_preference"}:
         c.pop("knowledgeType")
     if (c.get("factType"), c.get("predicate")) in {("event", "occurred"), ("knowledge", "states")} and not c.get("object"):
@@ -62,6 +70,24 @@ def _business(content: Mapping[str, Any], *, omit_year: bool) -> dict:
     if year:
         t = c["qualifiers"]["validTime"]
         t["precision"] = "year"
+        t["start"] = None  # Exact redundant YYYY, checked against the literal above.
+        t["end"] = None
+        # English/Chinese extraction labels are equivalent only when the whole
+        # literal statement proves the same positive preference and object.
+        obj = c.get("object") or {}
+        q = c.get("qualifiers") or {}
+        label = obj.get("label") if isinstance(obj, Mapping) else None
+        literal = re.fullmatch(re.escape(year) + r"[，,]?我喜欢喝([^，,。.!！？?；;]+)", statement)
+        noun = literal.group(1) if literal else None
+        if (c.get("factType") == "preference" and noun
+                and label in {noun, "喝" + noun}
+                and c.get("predicate") in {"喜欢喝", "喜欢", "liked", "likes"}
+                and q.get("polarity") == "positive"
+                and q.get("strengthExpression") in {None, "", "喜欢"}
+                and q.get("superlativeAsserted") is False):
+            c["object"]["label"] = noun
+            c["predicate"] = "喜欢喝"
+            q["strengthExpression"] = "喜欢"
         if omit_year:
             t["expression"] = "<year>"
             statement = statement.replace(year, "<year>", 1)

@@ -1108,7 +1108,7 @@ def _dimension_narrative(*, facet: str, records: list[dict[str, Any]]) -> str | 
     return templates[facet].format(values="、".join(values[:8]))
 
 
-def build_person_memory_model(entries: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def build_person_memory_model(entries: Iterable[Mapping[str, Any]], *, biography_topics: bool = False, biography_model_config: str = "reviewed-polish-v2", biography_bindings: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Build all rebuildable person projections from current formal memory."""
 
     records = [_normalize_entry(entry) for entry in entries]
@@ -1130,7 +1130,11 @@ def build_person_memory_model(entries: Iterable[Mapping[str, Any]]) -> dict[str,
     semantic_consolidation, consolidated_records = _semantic_consolidation(records)
     cognitive = _cognitive_projection(consolidated_records)
     relationships = _relationship_projection(consolidated_records)
-    biography = _biography_projection(consolidated_records, source_fingerprint)
+    if biography_topics:
+        from .person_biography import build_biography
+        biography = build_biography(records, source_fingerprint, model_config=biography_model_config, bindings=biography_bindings)
+    else:
+        biography = _biography_projection(consolidated_records, source_fingerprint)
     dimensions = _dimensions(consolidated_records)
     model_material = {
         "sourceFingerprint": source_fingerprint,
@@ -1379,6 +1383,9 @@ def build_person_memory_model_incremental(
     *,
     previous_model: Mapping[str, Any],
     entries: Iterable[Mapping[str, Any]],
+    biography_topics: bool = False,
+    biography_model_config: str = "reviewed-polish-v2",
+    biography_bindings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Update current-formal projections without rebuilding unaffected dimensions.
 
@@ -1392,6 +1399,8 @@ def build_person_memory_model_incremental(
 
     if not isinstance(previous_model, Mapping):
         raise PersonMemoryModelError("incremental model requires a prior projection")
+    if previous_model.get("algorithmVersion") != PERSON_MEMORY_MODEL_ALGORITHM_VERSION:
+        return build_person_memory_model(entries, biography_topics=biography_topics, biography_model_config=biography_model_config, biography_bindings=biography_bindings)
     records, direct_changed, previous_records = _current_records_from_entries(
         previous_model=previous_model,
         entries=entries,
@@ -1425,12 +1434,19 @@ def build_person_memory_model_incremental(
         records=consolidated_records,
         affected_facets=affected_facets,
     )
-    biography, rebuilt_sections = _incremental_biography_projection(
-        previous_model=previous_model,
-        records=consolidated_records,
-        source_fingerprint=source_fingerprint,
-        affected_memory_ids=affected_memory_ids,
-    )
+    if biography_topics:
+        from .person_biography import build_biography
+        biography = build_biography(
+            records, source_fingerprint, previous_model.get("biographyProjection"),
+            model_config=biography_model_config, bindings=biography_bindings,
+        )
+        old_sections = {s["sectionId"]: s for s in previous_model.get("biographyProjection", {}).get("sections", [])}
+        rebuilt_sections = tuple(s["sectionId"] for s in biography["sections"] if s != old_sections.get(s["sectionId"]))
+    else:
+        biography, rebuilt_sections = _incremental_biography_projection(
+            previous_model=previous_model, records=consolidated_records,
+            source_fingerprint=source_fingerprint, affected_memory_ids=affected_memory_ids,
+        )
     cognitive = _cognitive_projection(consolidated_records)
     relationships = _relationship_projection(consolidated_records)
     model_material = {

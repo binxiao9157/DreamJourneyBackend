@@ -1,0 +1,388 @@
+{
+  "coffee-2017": [
+    {
+      "memoryKind": "knowledge",
+      "content": {
+        "affect": null,
+        "facets": {
+          "time": [
+            {
+              "value": "2017年",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated"
+            }
+          ],
+          "goals": [],
+          "habits": [],
+          "people": [],
+          "places": [],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": {
+          "label": "咖啡",
+          "category": null,
+          "entityId": null
+        },
+        "domains": [],
+        "factType": "preference",
+        "semantic": {
+          "title": "2017年，我喜欢喝咖啡",
+          "facets": [
+            "knowledge"
+          ],
+          "entities": [],
+          "eventTime": null,
+          "narrative": "2017年，我喜欢喝咖啡。",
+          "primaryKind": "knowledge",
+          "emotionEvidence": []
+        },
+        "predicate": "喜欢喝",
+        "statement": "2017年，我喜欢喝咖啡。",
+        "dimensions": [
+          "knowledgeSkills",
+          "preferences"
+        ],
+        "exceptions": [],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "00000000-0000-4000-8000-000000000011",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": null,
+          "polarity": "positive",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "year",
+            "expression": "2017年"
+          },
+          "strengthExpression": "喜欢",
+          "superlativeAsserted": false,
+          "currentApplicability": "historical"
+        },
+        "learnedFrom": null,
+        "applicability": null,
+        "knowledgeType": "personal_experience",
+        "claimSubjectId": null,
+        "memorySubjectId": null
+      }
+    }
+  ],
+  "coffee-2024": [
+    {
+      "memoryKind": "experience",
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "2024年，我喜欢喝咖啡。",
+        "affect": null,
+        "facets": {
+          "time": [
+            {
+              "value": "2024年",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                1
+              ]
+            }
+          ],
+          "goals": [],
+          "habits": [],
+          "people": [],
+          "places": [],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": {
+          "label": "咖啡",
+          "category": null,
+          "entityId": null
+        },
+        "summary": "2024年，我喜欢喝咖啡。",
+        "factType": "preference",
+        "semantic": {
+          "title": "2024年，我喜欢喝咖啡",
+          "facets": [
+            "lifeEvent"
+          ],
+          "entities": [],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "2024年，我喜欢喝咖啡。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "liked",
+        "statement": "2024年，我喜欢喝咖啡。",
+        "dimensions": [
+          "lifeEvents",
+          "preferences"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "00000000-0000-4000-8000-000000000011",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": null,
+          "polarity": "positive",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": "2024",
+            "precision": "year",
+            "expression": "2024年"
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "historical"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          1
+        ]
+      }
+    }
+  ],
+  "live-short": [
+    {
+      "memoryKind": "experience",
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "我每周六上午在家练习折纸。",
+        "affect": null,
+        "facets": {
+          "time": [
+            {
+              "value": "每周六上午",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                1
+              ]
+            }
+          ],
+          "goals": [],
+          "habits": [
+            {
+              "value": "每周六上午在家练习折纸",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                1
+              ]
+            }
+          ],
+          "people": [],
+          "places": [
+            {
+              "value": "家",
+              "confidence": 1.0,
+              "evidenceMode": "ownerStated",
+              "sourceTurnIndices": [
+                1
+              ]
+            }
+          ],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": null,
+        "summary": "我每周六上午在家练习折纸。",
+        "factType": "habit",
+        "semantic": {
+          "title": "我每周六上午在家练习折纸",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "entities": [
+            {
+              "name": "家",
+              "confidence": 1.0,
+              "entityType": "place",
+              "evidenceMode": "ownerStated"
+            }
+          ],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "我每周六上午在家练习折纸。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "occurred",
+        "statement": "我每周六上午在家练习折纸。",
+        "dimensions": [
+          "lifeEvents",
+          "habits"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "00000000-0000-4000-8000-000000000011",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": {
+            "label": "家",
+            "category": null,
+            "entityId": null
+          },
+          "polarity": "positive",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": "每周六上午"
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "unknown"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          1
+        ]
+      }
+    },
+    {
+      "memoryKind": "experience",
+      "content": {
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "event": "我把折纸放在蓝色收纳盒里。",
+        "affect": null,
+        "facets": {
+          "time": [],
+          "goals": [],
+          "habits": [],
+          "people": [],
+          "places": [],
+          "values": [],
+          "emotions": [],
+          "identity": [],
+          "confidence": 0.9,
+          "personality": [],
+          "reflections": [],
+          "relationships": []
+        },
+        "object": null,
+        "summary": "我把折纸放在蓝色收纳盒里。",
+        "factType": "event",
+        "semantic": {
+          "title": "我把折纸放在蓝色收纳盒里",
+          "facets": [
+            "lifeEvent"
+          ],
+          "entities": [],
+          "eventTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "narrative": "我把折纸放在蓝色收纳盒里。",
+          "primaryKind": "lifeEvent",
+          "emotionEvidence": []
+        },
+        "predicate": "occurred",
+        "statement": "我把折纸放在蓝色收纳盒里。",
+        "dimensions": [
+          "lifeEvents"
+        ],
+        "provenance": {
+          "mode": "selfReport",
+          "evidenceRefs": [
+            {
+              "turnId": null,
+              "relation": "supports",
+              "sourceId": "00000000-0000-4000-8000-000000000011",
+              "sourceVersion": 1
+            }
+          ],
+          "speakerPersonId": null,
+          "contributorAccountId": null
+        },
+        "qualifiers": {
+          "place": null,
+          "polarity": "positive",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "unknown"
+        },
+        "claimSubjectId": null,
+        "memorySubjectId": null,
+        "sourceTurnIndices": [
+          3
+        ]
+      }
+    }
+  ]
+}

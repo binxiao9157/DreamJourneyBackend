@@ -5,6 +5,7 @@ These local batch summaries are drafts: later cross-batch corrections are resolv
 again before the final snapshot may publish them.
 """
 from types import SimpleNamespace
+from app.domain.owner_truth.live_theme_fallback import reuse_scope, private_draft_coverage
 from hashlib import sha256
 from app.async_effects.owner_truth_live_recovery_worker import RecoveryThemeAssembler, RecoveryThemePageFailed
 from app.domain.owner_truth.live_topics import supported_atom_catalog, digest, LiveThemeConflict
@@ -83,8 +84,10 @@ class RecoveryPrivateThemePlanner(RecoveryThemeAssembler):
             catalog=supported_atom_catalog(atoms=atoms,turns=turns)
             themes,omitted,blocked=self.organize_pages(lease=lease,run_id=run_id,revision=plan.ordinal,
                 source_id='private:'+parent,catalog=catalog)
-            coverage=dict(scope='privateBatchTheme',parentUnitId=parent,notAuthoritativeUntilFinalRelations=True,
-                themes=[t.payload() for t in themes],omittedAtomIds=list(omitted),blockedThemes=list(blocked))
+            coverage=private_draft_coverage(parent_unit_id=parent,catalog=catalog,
+                themes=themes,omitted=omitted,blocked=blocked,scope=reuse_scope(
+                    run_id=run_id,vault_id=lease.context.vault_id,owner_subject_id=lease.context.owner_subject_id,
+                    authority_epoch=lease.epoch,capture_generation=lease.generation))
             with self._uow('DraftCommit',lease):
                 self._admit(lease)
                 store.owner_truth_live_long_memory_repository().record_unit_result(plan=plan,atoms=[],

@@ -5,6 +5,7 @@ outside transactions. Each exact call is reserved in the existing run budget
 and its accepted response is durable, so lease recovery does not repeat it.
 """
 from dataclasses import dataclass
+from app.domain.owner_truth.live_theme_fallback import reuse_scope, eligible_private_themes
 from hashlib import sha256
 from app.domain.owner_truth.live_topics import supported_atom_catalog,digest,LiveThemeConflict,SupportedLiveTheme
 from app.services.owner_truth_live_theme_provider import DeepSeekLiveThemeProvider
@@ -120,20 +121,35 @@ class RecoveryThemeAssembler:
             atoms=page,proposal=proposal,page_key=key)
         return self.provider.validate(atoms=page,proposal=proposal,review=review)
 
+    def _reuse_private_themes(self, *, omitted):
+        remaining=set(omitted);selected=[]
+        for theme,reference in sorted(getattr(self,'_verified_private_themes',()),
+                key=lambda item:(-len(item[0].atom_ids),item[0].key,item[1]['unitId'])):
+            if set(theme.atom_ids)<=remaining:
+                selected.append(theme);remaining.difference_update(theme.atom_ids)
+                self.private_theme_fallbacks.append(dict(reference,themeKey=theme.key,
+                    atomIds=list(theme.atom_ids),supportHash=theme.support_hash))
+        return selected,set(omitted)-remaining
+
     def _regroup_pages(self, *, repair, blocked):
-        # At most two input partitions; preserve order and normal page limits.
-        # Splitting only rejected groups keeps already verified themes intact
-        # and does not turn every fact into its own user-visible card.
-        second=set()
+        # Keep rejected event groups separate; never pool their split halves.
+        # Two repair pages maximum per original page, within the existing budget.
+        partitions=[];assigned=set()
         for entry in blocked:
             if entry.get('groupingRejected') is not True:
                 continue
-            members=[a['atomId'] for a in repair if a['atomId'] in entry['atomIds']]
-            if len(members)>1:
-                second.update(members[(len(members)+1)//2:])
-        partitions=([a for a in repair if a['atomId'] not in second],
-                    [a for a in repair if a['atomId'] in second])
-        return [page for part in partitions if part for page in self.provider.pages(part)]
+            members=[a for a in repair if a['atomId'] in entry['atomIds'] and a['atomId'] not in assigned]
+            assigned.update(a['atomId'] for a in members)
+            middle=(len(members)+1)//2
+            partitions.extend(part for part in (members[:middle],members[middle:]) if part)
+        other=[a for a in repair if a['atomId'] not in assigned]
+        if other:partitions.append(other)
+        pages=[]
+        for part in partitions:
+            for page in self.provider.pages(part):
+                pages.append(page)
+                if len(pages)==2:return pages
+        return pages
 
     def organize_pages(self, *, lease,run_id,revision,source_id,catalog):
         if not catalog:return (),(),()
@@ -154,10 +170,14 @@ class RecoveryThemeAssembler:
                         # One bounded regroup of rejected supported facts. This is
                         # a new exact request, not a retry of the same bad merge.
                         # Independent support/correction checks remain unchanged.
+                        reused,recovered=self._reuse_private_themes(omitted=page_omitted)
+                        page_themes.extend(reused);page_omitted-=recovered
+                        page_blocked=[dict(b,atomIds=[a for a in b['atomIds'] if a not in recovered])
+                            for b in page_blocked if set(b['atomIds'])-recovered]
                         repair=[dict(a,groupingRepair='split-uncertain-events-v1') for a in page
                             if a['atomId'] in page_omitted and a['supportState']=='supported']
                         recovered=set()
-                        repair_strategy=('regroup-split-v2' if any(b.get('groupingRejected') is True for b in page_blocked) else 'regroup')
+                        repair_strategy='regroup-isolated-v3'
                         for ri,repair_page in enumerate(self._regroup_pages(repair=repair,blocked=page_blocked)):
                             try:
                                 fixed=self._organize_page(**context,page=repair_page,key=f'{key}:{repair_strategy}:{ri}')
@@ -175,6 +195,11 @@ class RecoveryThemeAssembler:
                     page_omitted={a['atomId'] for a in page}
                     page_blocked=[dict(key=key,atomIds=sorted(page_omitted),
                         reason='modelUnitExhausted',failureCode=error.code)]
+                if level==0 and page_omitted:
+                    reused,recovered=self._reuse_private_themes(omitted=page_omitted)
+                    page_themes.extend(reused);page_omitted-=recovered
+                    page_blocked=[dict(b,atomIds=[a for a in b['atomIds'] if a not in recovered])
+                        for b in page_blocked if set(b['atomIds'])-recovered]
                 if level>0 and page_omitted:
                     # A failed larger summary cannot invalidate already reviewed
                     # child themes. No old/history facts are imported here.
@@ -190,6 +215,27 @@ class RecoveryThemeAssembler:
                     proof=digest([theme.support_hash,[u for u in page if u['atomId'] in theme.atom_ids]])
                     expanded=SupportedLiveTheme(digest([key,theme.key,ids]),theme.title,theme.summary,
                         ids,evidence,theme.dimensions,proof)
+                    final.append(expanded)
+                    uid='verified-theme:'+digest(expanded.payload())
+                    content=dict(title=theme.title,summary=theme.summary)
+                    next_units.append(dict(atomId=uid,content=content,contentHash=digest(content),
+                        dimensions=list(theme.dimensions),supportState='supported',evidenceIds=[proof],
+                        evidence=[dict(evidenceId=proof,kind='independentlyVerifiedSummary',text=theme.summary)]))
+                    next_expansions[uid]=ids;next_parents[uid]=expanded
+            if level==0 and omitted:
+                # An intact private theme can straddle final input pages. Only
+                # after all leaf pages are accounted for can its whole membership
+                # be reused without duplicating a successfully published member.
+                reused,recovered=self._reuse_private_themes(omitted=omitted)
+                omitted-=recovered
+                blocked=[dict(b,atomIds=[a for a in b['atomIds'] if a not in recovered])
+                    for b in blocked if set(b['atomIds'])-recovered]
+                for theme in reused:
+                    ids=tuple(sorted(theme.atom_ids))
+                    evidence=tuple(sorted({e for aid in ids for e in leaves[aid]['evidenceIds']}))
+                    proof=digest([theme.support_hash,[leaves[aid] for aid in ids]])
+                    expanded=SupportedLiveTheme(digest(['private-cross-page',theme.key,ids]),
+                        theme.title,theme.summary,ids,evidence,theme.dimensions,proof)
                     final.append(expanded)
                     uid='verified-theme:'+digest(expanded.payload())
                     content=dict(title=theme.title,summary=theme.summary)
@@ -454,6 +500,7 @@ class RecoveryThemeAssembler:
         return resolved,dict(lineage=lineage,retractedAtomIds=sorted(retracted))
 
     def assemble(self,*,lease,intent,source):
+        self._verified_private_themes=[];self.private_theme_fallbacks=[]
         metadata=source.source_metadata or {}
         if metadata.get('origin')!='liveRecoverySnapshot':
             raise contract_failure('pipelineInput','recoverySourceRequired',category='domain')
@@ -494,9 +541,11 @@ class RecoveryThemeAssembler:
             relation_failure=[dict(reason='relationResolutionFailed',failureCode=error.code,
                 atomIds=[str(a['id']) for a in atoms])]
         catalog=supported_atom_catalog(atoms=atoms,turns=metadata['conversationTurns'])
-        # Private grouping is a bounded hint, never evidence. Reuse only drafts
-        # whose entire membership survived cross-batch resolution unchanged.
-        # Corrected/retracted/merged atoms cannot import an obsolete draft title.
+        # Old drafts remain hints. New receipts permit whole-theme reuse only
+        # after exact scope, content and source-evidence binding validation.
+        scope=reuse_scope(run_id=run_id,vault_id=intent.target.vault_id,
+            owner_subject_id=intent.target.owner_subject_id,authority_epoch=intent.target.authority_epoch,
+            capture_generation=metadata['productCaptureGeneration'])
         draft_refs=[];current_ids={a['atomId'] for a in catalog}
         with self._uow('ReadPrivateThemes',lease):
             self._admit(lease)
@@ -508,6 +557,9 @@ class RecoveryThemeAssembler:
             coverage=draft['output_coverage']
             if digest(coverage)!=draft['output_hash']:raise LiveThemeConflict('privateThemeDraftHashMismatch')
             draft_refs.append(dict(unitId=str(draft['id']),outputHash=draft['output_hash']))
+            reference=dict(draft_refs[-1],scope=scope)
+            self._verified_private_themes.extend((theme,reference) for theme in
+                eligible_private_themes(coverage=coverage,scope=scope,catalog=catalog))
             for theme in coverage.get('themes',[]):
                 if set(theme['atomIds'])<=current_ids:
                     hint=dict(key=digest([str(draft['id']),theme['key']]),title=theme['title'])
@@ -518,7 +570,7 @@ class RecoveryThemeAssembler:
             revision=metadata['snapshotRevision'],source_id=source.source_id,catalog=catalog)
         # Relationship review quality is not a count of unpublished facts.
         # It still requires the same independent full-context safety gate.
-        if (failed or omitted or blocked or relation_failure) and themes:
+        if (failed or omitted or blocked or relation_failure or self.private_theme_fallbacks) and themes:
             # Include all received owner text, not just the failed page; this
             # preserves enough adjacent context for pronouns/corrections.
             themes,guard_blocked=self.guard_partial_themes(lease=lease,run_id=run_id,
@@ -543,7 +595,7 @@ class RecoveryThemeAssembler:
             from dataclasses import replace
             command=replace(command,proposals=tuple(replace(p,correction_of_memory_version_id=corrections.get(str(a['id'])))
                 for a,p in zip(selected,command.proposals)))
-        manifest=dict(relationDiagnostics=relation_failure,relationScreens=list(getattr(self,'relation_screens',[])),deferredRelations=list(getattr(self,'deferred_relations',[])),privateDraftRefs=draft_refs,factResolution=resolution,unchangedRelations=list(unchanged),schemaVersion='live-recovery-publication-v1',snapshotId=metadata['snapshotId'],
+        manifest=dict(privateThemeFallbacks=list(self.private_theme_fallbacks),relationDiagnostics=relation_failure,relationScreens=list(getattr(self,'relation_screens',[])),deferredRelations=list(getattr(self,'deferred_relations',[])),privateDraftRefs=draft_refs,factResolution=resolution,unchangedRelations=list(unchanged),schemaVersion='live-recovery-publication-v1',snapshotId=metadata['snapshotId'],
             snapshotHash=metadata['snapshotHash'],sourceId=source.source_id,sourceHash=source.source_content_hash,
             receivedRanges=metadata['receivedRanges'],missingRanges=metadata['missingRanges'],
             endPositionKnown=metadata['endPositionKnown'],omittedAtomIds=list(omitted),blockedThemes=list(blocked),

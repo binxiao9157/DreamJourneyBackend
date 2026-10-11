@@ -1,0 +1,143 @@
+{
+  "block": {
+    "text": "我把折纸放在白色收纳盒里每周日下午在家练习折纸",
+    "title": "折纸",
+    "facets": [
+      "habit",
+      "lifeEvent"
+    ],
+    "blockId": "paragraph-17a13fc032da633a9ff1f961",
+    "topicId": "topic-17a13fc032da633a9ff1f961",
+    "evidence": [
+      {
+        "memoryId": "0ac93f6d-8aa0-5d86-8f95-b263053d7046",
+        "sourceId": "751d5d36-dca2-48b2-be9a-7ec82b1fbb0c",
+        "contentHash": "18e0268e7f666c01638e4260780984a34fe8ffa1806d8dbbc581cdf7d3e13161",
+        "sourceVersion": 1,
+        "memoryVersionId": "ab63da1f-b99a-5860-aede-10178f4b9a1f"
+      },
+      {
+        "memoryId": "ee0eec3e-559f-548a-a0ce-13be1148387e",
+        "sourceId": "224a1132-83c4-4847-afa4-a95114ae6e85",
+        "contentHash": "c986658325e6b55a06c44462944ab2420af1bf7dd2bfb5425a53b42c3a722121",
+        "sourceVersion": 1,
+        "memoryVersionId": "2d3438a9-74dc-5293-bc74-fb0eac59ca0e"
+      }
+    ],
+    "blockType": "narrative",
+    "sentences": [
+      {
+        "text": "我把折纸放在白色收纳盒里",
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": null
+        },
+        "evidence": [
+          {
+            "memoryId": "0ac93f6d-8aa0-5d86-8f95-b263053d7046",
+            "sourceId": "751d5d36-dca2-48b2-be9a-7ec82b1fbb0c",
+            "contentHash": "18e0268e7f666c01638e4260780984a34fe8ffa1806d8dbbc581cdf7d3e13161",
+            "sourceVersion": 1,
+            "memoryVersionId": "ab63da1f-b99a-5860-aede-10178f4b9a1f"
+          }
+        ],
+        "qualifiers": {
+          "place": null,
+          "polarity": "neutral",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "unknown"
+        },
+        "sentenceId": "sentence-fa3da2dd599b3a92c7d883db"
+      },
+      {
+        "text": "每周日下午在家练习折纸",
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": "每周日下午"
+        },
+        "evidence": [
+          {
+            "memoryId": "ee0eec3e-559f-548a-a0ce-13be1148387e",
+            "sourceId": "224a1132-83c4-4847-afa4-a95114ae6e85",
+            "contentHash": "c986658325e6b55a06c44462944ab2420af1bf7dd2bfb5425a53b42c3a722121",
+            "sourceVersion": 1,
+            "memoryVersionId": "2d3438a9-74dc-5293-bc74-fb0eac59ca0e"
+          }
+        ],
+        "qualifiers": {
+          "place": {
+            "label": "家",
+            "category": null,
+            "entityId": null
+          },
+          "polarity": "neutral",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": "每周日下午"
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "current"
+        },
+        "sentenceId": "sentence-e5b2352b3f86b30b0465f500"
+      }
+    ],
+    "qualityState": "faithful",
+    "promptVersion": "evidence-polish-v5",
+    "sourceRevision": "a8e31769ec59daaec7ad87451cc157152c228418f1d6ebff7f1ddb119303cf37",
+    "uncoveredFacts": [],
+    "algorithmVersion": "topic-biography-v4",
+    "modelConfigVersion": "reviewed-polish-v2"
+  },
+  "response": {
+    "sentences": [
+      {
+        "text": "我每周日下午在家练习折纸，折纸则放在白色收纳盒里。",
+        "sourceSentenceIds": [
+          "sentence-e5b2352b3f86b30b0465f500",
+          "sentence-fa3da2dd599b3a92c7d883db"
+        ]
+      }
+    ],
+    "audit": {
+      "verdict": "rejected",
+      "facts": [
+        {
+          "sentenceId": "sentence-fa3da2dd599b3a92c7d883db",
+          "covered": true,
+          "qualifiersPreserved": true
+        },
+        {
+          "sentenceId": "sentence-e5b2352b3f86b30b0465f500",
+          "covered": true,
+          "qualifiersPreserved": true
+        }
+      ],
+      "sentences": [
+        {
+          "index": 0,
+          "supported": false
+        }
+      ],
+      "issues": [
+        "输出句将“我把折纸放在白色收纳盒里”与“每周日下午在家练习折纸”合并，并用“则”建立对比/承接关系，但原始事实未提供该关系依据。",
+        "原始句“我把折纸放在白色收纳盒里”未标明时间，输出将其置于“每周日下午”的语境中，可能改变时间限定。"
+      ]
+    }
+  }
+}

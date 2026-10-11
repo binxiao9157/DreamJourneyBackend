@@ -93,8 +93,9 @@ class ThemeRegroupBoundaries(unittest.TestCase):
                  dict(atomIds=['a4','a5'],groupingRejected=True)]
         pages=a._regroup_pages(repair=page,blocked=blocked)
         self.assertEqual([[x['atomId'] for x in p] for p in pages],
-                         [['a0','a1','a4','a6','a7'],['a2','a3','a5']])
-        self.assertEqual(sum(map(len,pages)),len(page))
+                         [['a0','a1'],['a2','a3']])
+        self.assertEqual(len(pages),2)
+        self.assertEqual(sum(map(len,pages)),4)
         for group in blocked:
             for part in pages:self.assertFalse(set(group['atomIds'])<={x['atomId'] for x in part})
     def test_non_grouping_repair_preserves_original_input_page(self):

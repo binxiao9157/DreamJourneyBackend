@@ -1,0 +1,19 @@
+{
+  "version": "0129",
+  "name": "owner_truth_biography_topic_jobs",
+  "phase": "expand",
+  "compatibility": "additive",
+  "summary": "Independent, bounded derived biography artifacts; no authoritative memory writes.",
+  "operations": [
+    "create topic job and artifact table; no backfill"
+  ],
+  "rollback": "Disable biography composition worker and topic flag. Keep artifacts for audit. Profile still filters current facts.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": false
+  }
+}

@@ -587,6 +587,13 @@ class PostgresStore:
             raise RuntimeError("owner truth formal memory requires an active unit of work")
         return PostgresOwnerTruthFormalMemoryRepository(active.connection)
 
+    def owner_truth_biography_repository(self):
+        from app.services.owner_truth_biography import PostgresBiographyRepository
+        active = self._current_uow.get()
+        if active is None:
+            raise RuntimeError("biography repository requires an active unit of work")
+        return PostgresBiographyRepository(active.connection)
+
     def narrative_repository(self) -> PostgresNarrativeRepository:
         """Return the narrative repository bound to the active request/worker UoW."""
 

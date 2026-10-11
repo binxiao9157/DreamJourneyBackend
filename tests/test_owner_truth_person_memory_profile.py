@@ -333,7 +333,7 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertNotIn("lifeEvent", contract["affectedDimensions"])
         self.assertEqual(contract["sourceFingerprint"], incremental.source_fingerprint)
 
-    def test_profile_marks_last_evidence_bound_version_stale_when_derivation_fails(self) -> None:
+    def test_profile_returns_current_facts_when_incremental_derivation_fails(self) -> None:
         self._activate(
             kind=MemoryKind.EXPERIENCE,
             content={"summary": "我在学校读书时参加过辩论队。", "facets": _facets()},
@@ -354,7 +354,9 @@ class OwnerTruthPersonMemoryProfileTests(unittest.TestCase):
         self.assertEqual(contract["state"], "stale")
         self.assertEqual(contract["derivationState"], "stale")
         self.assertEqual(contract["staleReason"], "derivationFailed")
-        self.assertEqual(contract["profileVersion"], ready.profile_version)
+        self.assertNotEqual(contract["profileVersion"], ready.profile_version)
+        self.assertEqual(contract["memoryCount"], 2)
+        self.assertIn("先记录事实", contract["lifeRecord"]["text"])
 
     def test_paragraph_evidence_uses_each_biography_block_not_the_whole_chapter(self) -> None:
         for index in range(4):

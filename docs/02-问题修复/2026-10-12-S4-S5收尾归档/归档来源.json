@@ -1,0 +1,242 @@
+[
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S3-修后真机复验-run02.md",
+    "sourceSHA256": "f442a872b70b84433591b9e0b9dfde64fb0bc141a239209abd60739a1b92dea6",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S3-修后真机复验-run02.md",
+    "archiveSHA256": "b6fbc7c4e12b546349599f3103bfd5c8171111649dbc018b5509770a09d76ee6"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S4-真机专项验证-run01.md",
+    "sourceSHA256": "7dc6ffcbe155c0b48a22cc27804962a8f37bf38cde2f4dc6a1b3d0d5f3038f57",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S4-真机专项验证-run01.md",
+    "archiveSHA256": "5052028946cb5002b56a9ccb68a5e6b8d910f9890586fe817ba141a26117ab36"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S4-实施与验收报告.md",
+    "sourceSHA256": "a8c0663552e36ee9e2c20323160d56d8c54a45676915e356fa036a1fe355dd33",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S4-实施与验收报告.md",
+    "archiveSHA256": "c41ac14062489da988794564efde02e003539c81dba91a283430922cabbf076c"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/2026-10-08-详细设计与接口约束.md",
+    "sourceSHA256": "2326d962f41f4b9c83f6c910f66ed9d518aafd2b64b2b3c683e23e66df1d0f62",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/2026-10-08-详细设计与接口约束.md",
+    "archiveSHA256": "c09f22a9c65c6b8a17a04f7ecd7a85d45d6068dde809b1a2ba2d7466b4a1b845"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S5-最终收尾清单.md",
+    "sourceSHA256": "290cf5a4eb87cef7bc0e97840c162c4bd4d7166bd0b3aa21450bdc86a3a5c033",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S5-最终收尾清单.md",
+    "archiveSHA256": "d69c53a883343510b6d93c9efac8d0f0f7ac3210d9b6bed0077473c0fcde6ffe"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S3-实施与验证.md",
+    "sourceSHA256": "8c7f9345c00639ace595344c541cbef2cf8325c4667227f029b6a7e07a8d6c51",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S3-实施与验证.md",
+    "archiveSHA256": "885ae78e91c8aca2ec9d7d58dff4cb90820d2298346f926bbdf33ca0e44bed7d"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S4-真实模型阅读样例.md",
+    "sourceSHA256": "51e8c60ec4e7256e91e926eace7bda75d9fd27da90ff8799b341fddbeec06e96",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S4-真实模型阅读样例.md",
+    "archiveSHA256": "058ec844f2d2de7d1f2c84cd9ca0abc1125d7b1b0c4513d5c515e82d1be516b9"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S4-详细实施与验收.md",
+    "sourceSHA256": "02416c3bc9ec9e90cf8811a4b6df4cd20cf89f752fd5fcc74aa151e049dc6794",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S4-详细实施与验收.md",
+    "archiveSHA256": "5d71e37a483ffd729577426f9b8bb1fee74f8a1311f96ddbcf8dd7b14e692669"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S3-详细实施与验收.md",
+    "sourceSHA256": "d9dc8fc88a0e5f27f5da12268fda41deb70ed35623110cf0e1857cdfedb48223",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S3-详细实施与验收.md",
+    "archiveSHA256": "d839e3dcd4459945d4ecbcd728a99ee9882b22324534c745f66057a2734cb675"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S2-会中授权更新接入细则.md",
+    "sourceSHA256": "a89ecfdd897c9b0624e920b693f5c3fc8e643567affc8eb389f79307ff937b92",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S2-会中授权更新接入细则.md",
+    "archiveSHA256": "a89ecfdd897c9b0624e920b693f5c3fc8e643567affc8eb389f79307ff937b92"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S5-执行与验收记录.md",
+    "sourceSHA256": "56d0c905d51637610685a7f8941f095a2d48eee5c92825c0d56a855948ddbfe4",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S5-执行与验收记录.md",
+    "archiveSHA256": "78fac3bed7fefba08f3e2df4c4dc5c5d20693e50fbc80d870ca75064220ea1ba"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S3-真机验证.md",
+    "sourceSHA256": "99b02ca95ff5780ccf3556d32c0a30d31d3126b46a6a46c7124d3ea2ab5197d9",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S3-真机验证.md",
+    "archiveSHA256": "4290081faee1746ce06a0e66f70b73b23de99fff1cd47c2f6d8f15f6e8044bf9"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/2026-10-08-分阶段实施与验收计划.md",
+    "sourceSHA256": "fa77543e67ee9771c3ea92a13df3a63fc81674f4650700d4ec0f8201c66bcedf",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/2026-10-08-分阶段实施与验收计划.md",
+    "archiveSHA256": "45de575e90d6d2f10a1da34a85e3de6de7b5768d4cec96db8ee90eaf822e0a91"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/README.md",
+    "sourceSHA256": "6d7ef66988ebd9e1d4c4a912146eb6a51966fb88be8761b1ced280f733d7e801",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/README.md",
+    "archiveSHA256": "668ea406537c4cabac2099b6ed1d4fdcef7c179278f7ca09e4464bbc773a2c48"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S1-实施验收报告.md",
+    "sourceSHA256": "57e57224eb4f6f4d9f6d9b3271ac92028a6ce218a83c7c815d70d9967f246cba",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S1-实施验收报告.md",
+    "archiveSHA256": "dd62698585a38d6243386b0b9d6b02fbbcfa4dd648f05c71fc9ed89d8c8adaf2"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/实施与验证.md",
+    "sourceSHA256": "d0e4e02936bfd3848877d29b29ce2f6516f4ed441b557a651574c9d5e40a7e8a",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/实施与验证.md",
+    "archiveSHA256": "05c3705103cf7dd44bbe8157a6c2da82033bb9cdf8ad74a4710db1329941db10"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S2-真机准备与签名阻塞记录.md",
+    "sourceSHA256": "7521a70be8329f0e1f34046fd1794060bae203f359b9a22c9bebb594981e76b7",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S2-真机准备与签名阻塞记录.md",
+    "archiveSHA256": "e2998ed24f2cc1be30d1c17f53bb332b024bb7b9d1811cedc562b7dc28fbae34"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/2026-10-08-记忆驱动对话与人生正文持续更新设计方案.md",
+    "sourceSHA256": "8b2d7eca866431cf5318c491a94016a8b28b42e9960fb33e606489745f760d72",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/2026-10-08-记忆驱动对话与人生正文持续更新设计方案.md",
+    "archiveSHA256": "5c7c462681dcce55c189febdfab1cd4994e808ee1ada0f1f096ba0a6ca139052"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S2-SDK原配置更新真机实验报告.md",
+    "sourceSHA256": "00b75c231329e577fb9309c52d31c6260e4ff2c3d281bf6f9dcf1faeb840b02d",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S2-SDK原配置更新真机实验报告.md",
+    "archiveSHA256": "d04a10659bb86b2857a9de225adff30801392a9346ecad784ae3408cf8facd2e"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S2-动态记忆实现与真机验证报告.md",
+    "sourceSHA256": "4c549fae6ed1de6f49fc1f857b90287dd724589d9b821d5a614a476ff129886e",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S2-动态记忆实现与真机验证报告.md",
+    "archiveSHA256": "b19245eea16cec12e26057b7f88968fb3b9dedf8dd2bf975c212985b1ce5af0a"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S0-S5-最终需求证据矩阵.md",
+    "sourceSHA256": "6ac764b786b667e7b1b01f0ec6a72de552023df1c8c78eebdc5b5b72f2680646",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S0-S5-最终需求证据矩阵.md",
+    "archiveSHA256": "a84f0d70b56ab340cd9dd029072c8ba75e29e608785f39a5440d4fe4712753b0"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S2-Live能力初探与真机门禁.md",
+    "sourceSHA256": "023659605eec3fa24ad698805e0c297e0d2f55e73c3491c2137d38af90a9e07f",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S2-Live能力初探与真机门禁.md",
+    "archiveSHA256": "037c217d7f25dd57ceacc827f3e6ae3cb664823812c840227b526d61820e09db"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S5-最终收尾验收报告.md",
+    "sourceSHA256": "58ffc148833f0f969e5c0fc0986775710ddb83ffa58cf8ae29599f93f254686d",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S5-最终收尾验收报告.md",
+    "archiveSHA256": "47e44d358946a6c10d564cad594fcfc87df437006d0ea5e7da9d2bdaf2263ea3"
+  },
+  {
+    "source": "02-设计文档/产品设计/记忆驱动对话与人生正文/S3-实施前影响与复用清单.md",
+    "sourceSHA256": "5278d18c255d9a477d4c4e1210ec9c77bbffae0fe5ba7337636659fae528ee3e",
+    "archive": "材料/02-设计文档/产品设计/记忆驱动对话与人生正文/S3-实施前影响与复用清单.md",
+    "archiveSHA256": "6c8ca5dd5e8e7f35df33c298f18f58cbf3bdbc802bddf5cfee3d69818f9f7ac8"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5正文自动派生部署补全/修复设计与验收方案.md",
+    "sourceSHA256": "7f6de4d0475ea9e2946c5aa173bfb5682f201874d8b15b1a0411a6c27ed6e18c",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5正文自动派生部署补全/修复设计与验收方案.md",
+    "archiveSHA256": "7f6de4d0475ea9e2946c5aa173bfb5682f201874d8b15b1a0411a6c27ed6e18c"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5正文自动派生部署补全/实施与验收报告.md",
+    "sourceSHA256": "c1760a3e578d83756d18cc45b8272c8938a229014a42eab0ef961e9b2c7c3878",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5正文自动派生部署补全/实施与验收报告.md",
+    "archiveSHA256": "c1760a3e578d83756d18cc45b8272c8938a229014a42eab0ef961e9b2c7c3878"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5正文自动派生部署补全/部署与真机验证.md",
+    "sourceSHA256": "3af73150f8eb5989b23dfb75c93070c9e73dd00ae806ebc95eebae6362874c9e",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5正文自动派生部署补全/部署与真机验证.md",
+    "archiveSHA256": "4e50a499442fa66294b4773ac7f93d4eefdf6bd1be0154b03effc649c9ce8d63"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5跨来源同文补证误判/修复设计与验收方案.md",
+    "sourceSHA256": "a97279e5a1350b586fb172eff159a833e072a0b78d1e2824907dd2a8660fb718",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5跨来源同文补证误判/修复设计与验收方案.md",
+    "archiveSHA256": "a97279e5a1350b586fb172eff159a833e072a0b78d1e2824907dd2a8660fb718"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5跨来源同文补证误判/实施与验收报告.md",
+    "sourceSHA256": "c774c820592169d3b45e1dcc4558b810e08e3beb8c808c68083d702b9e897f07",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5跨来源同文补证误判/实施与验收报告.md",
+    "archiveSHA256": "0ad669ef51692ad9b2ef8710640961625f6728a7faec8c2a6d38475ad1338521"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5真机正文主题分组退化/修复设计与验收方案.md",
+    "sourceSHA256": "5fe289043970d15b4b46d2c1e98050f4ad63fe32010addb35237a957d9f602a0",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5真机正文主题分组退化/修复设计与验收方案.md",
+    "archiveSHA256": "5fe289043970d15b4b46d2c1e98050f4ad63fe32010addb35237a957d9f602a0"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5真机正文主题分组退化/部署与真机测试记录.md",
+    "sourceSHA256": "0f8054dc3d52f0972a748165a7f09ec4933df0b87180f245fad7635c18f4703f",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5真机正文主题分组退化/部署与真机测试记录.md",
+    "archiveSHA256": "0f8054dc3d52f0972a748165a7f09ec4933df0b87180f245fad7635c18f4703f"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5真机正文主题分组退化/现场记录与分析.md",
+    "sourceSHA256": "ca3eee147e6d11f43ef7af87a840d3851db842da5114194db2ae8e890bbd1cb6",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5真机正文主题分组退化/现场记录与分析.md",
+    "archiveSHA256": "ca3eee147e6d11f43ef7af87a840d3851db842da5114194db2ae8e890bbd1cb6"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-11-S5真机正文主题分组退化/实施与本地验收报告.md",
+    "sourceSHA256": "a99adddcc7195077872efd154586ed1765f2a25e3acd394f575806732eafc086",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-11-S5真机正文主题分组退化/实施与本地验收报告.md",
+    "archiveSHA256": "c76a944318884754afb21235bd05969ad91fc2eb1795e557471161539f7b1e95"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/实施与验收报告.md",
+    "sourceSHA256": "b5656da2e12332e1cef4baf7ddd96db5bcfa5c4779409aafe0da2db09d4af1d0",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/实施与验收报告.md",
+    "archiveSHA256": "9f1bd1dd741d22bb6b1b22b95026bca523b47ba21fe7990be01cd3381e028d5b"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/部署与真机验证-run02.md",
+    "sourceSHA256": "8a519dafe7b88b10bd9f69183d336eb68a2cf9a48cfc57fe8f6a7de07008352d",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/部署与真机验证-run02.md",
+    "archiveSHA256": "171149e04aacc75c3cddb31114e6b7d370b05e46c2610f02ae4d355bfafa639e"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/部署与真机验证.md",
+    "sourceSHA256": "705f3d5a979ed83fe2a4ed7aae6c190f248be5ee6c76411e5f8424576c88d194",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/部署与真机验证.md",
+    "archiveSHA256": "b5d0746dfeafd9d749cdd33377144a93017fd1e05098ebf31cd44dd9ebe6a8c0"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/修复设计.md",
+    "sourceSHA256": "c7030b41cc6f9257156afbafdd3d18bb8995ac6bae3ae068c105757a21d2593a",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/修复设计.md",
+    "archiveSHA256": "fbc21fa389614b698b511b5bbcf165d5f68b706426eec3bc71851169c56cacd8"
+  },
+  {
+    "source": "02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/实施与验收-run02.md",
+    "sourceSHA256": "dd9e72fb6d47219d6c350d8723a81a04e4c5339e7711dbabada32b7c1572dde8",
+    "archive": "材料/02-问题修复/记忆系统/2026-10-09-S4主题归并与自然正文修复/实施与验收-run02.md",
+    "archiveSHA256": "71a91a267131f34be17dc62f9508009e73a404cdd7d8e00e4d95539927f1fd5b"
+  },
+  {
+    "source": "02-问题修复/测试与验收/2026-10-11-S5收尾工具终态与确认保护/修复设计与验收方案.md",
+    "sourceSHA256": "adc8206adfd5784ac66b98fe64416ead6ad580d00fd5b13fded7a5e824eed0aa",
+    "archive": "材料/02-问题修复/测试与验收/2026-10-11-S5收尾工具终态与确认保护/修复设计与验收方案.md",
+    "archiveSHA256": "adc8206adfd5784ac66b98fe64416ead6ad580d00fd5b13fded7a5e824eed0aa"
+  },
+  {
+    "source": "02-问题修复/测试与验收/2026-10-11-S5收尾工具终态与确认保护/十分钟补验送帧停顿记录.md",
+    "sourceSHA256": "f5f17b98429c63015439af70cc3c7635171065d57701f747e1a20312b3a12920",
+    "archive": "材料/02-问题修复/测试与验收/2026-10-11-S5收尾工具终态与确认保护/十分钟补验送帧停顿记录.md",
+    "archiveSHA256": "2cc07f069b0ab0e8254b95c157ffba9db9b4caf4bcda02664e370ae24193cf46"
+  }
+]

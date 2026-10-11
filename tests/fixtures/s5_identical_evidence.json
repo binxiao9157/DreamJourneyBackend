@@ -1,0 +1,144 @@
+{
+  "formal": {
+    "time": {
+      "end": null,
+      "start": null,
+      "precision": "unknown"
+    },
+    "event": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc\u3002",
+    "affect": null,
+    "facets": {
+      "time": [],
+      "goals": [],
+      "habits": [],
+      "people": [],
+      "places": [],
+      "values": [],
+      "emotions": [],
+      "identity": [],
+      "confidence": 0.9,
+      "personality": [],
+      "reflections": [],
+      "relationships": []
+    },
+    "object": null,
+    "summary": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc\u3002",
+    "factType": "event",
+    "semantic": {
+      "title": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc",
+      "facets": [
+        "lifeEvent"
+      ],
+      "entities": [],
+      "eventTime": {
+        "end": null,
+        "start": null,
+        "precision": "unknown"
+      },
+      "narrative": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc\u3002",
+      "primaryKind": "lifeEvent",
+      "emotionEvidence": []
+    },
+    "predicate": "occurred",
+    "statement": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc\u3002",
+    "dimensions": [
+      "lifeEvents"
+    ],
+    "provenance": {
+      "mode": "selfReport",
+      "evidenceRefs": [],
+      "speakerPersonId": null,
+      "contributorAccountId": null
+    },
+    "qualifiers": {
+      "place": null,
+      "polarity": "positive",
+      "scenario": null,
+      "validTime": {
+        "end": null,
+        "start": null,
+        "precision": "unknown",
+        "expression": null
+      },
+      "strengthExpression": null,
+      "superlativeAsserted": false,
+      "currentApplicability": "historical"
+    },
+    "claimSubjectId": null,
+    "memorySubjectId": null,
+    "sourceTurnIndices": [
+      27
+    ]
+  },
+  "candidate": {
+    "time": {
+      "end": null,
+      "start": null,
+      "precision": "unknown"
+    },
+    "event": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc\u3002",
+    "affect": null,
+    "facets": {
+      "time": [],
+      "goals": [],
+      "habits": [],
+      "people": [],
+      "places": [],
+      "values": [],
+      "emotions": [],
+      "identity": [],
+      "confidence": 0.9,
+      "personality": [],
+      "reflections": [],
+      "relationships": []
+    },
+    "object": null,
+    "summary": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc\u3002",
+    "factType": "event",
+    "semantic": {
+      "title": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc",
+      "facets": [
+        "lifeEvent"
+      ],
+      "entities": [],
+      "eventTime": {
+        "end": null,
+        "start": null,
+        "precision": "unknown"
+      },
+      "narrative": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc\u3002",
+      "primaryKind": "lifeEvent",
+      "emotionEvidence": []
+    },
+    "predicate": "occurred",
+    "statement": "\u6211\u628a\u9c7c\u98df\u88c5\u5728\u7eff\u8272\u7684\u5bc6\u5c01\u7f50\u91cc\u3002",
+    "dimensions": [
+      "lifeEvents"
+    ],
+    "provenance": {
+      "mode": "selfReport",
+      "evidenceRefs": [],
+      "speakerPersonId": null,
+      "contributorAccountId": null
+    },
+    "qualifiers": {
+      "place": null,
+      "polarity": "unknown",
+      "scenario": null,
+      "validTime": {
+        "end": null,
+        "start": null,
+        "precision": "unknown",
+        "expression": null
+      },
+      "strengthExpression": null,
+      "superlativeAsserted": false,
+      "currentApplicability": "historical"
+    },
+    "claimSubjectId": null,
+    "memorySubjectId": null,
+    "sourceTurnIndices": [
+      1
+    ]
+  }
+}

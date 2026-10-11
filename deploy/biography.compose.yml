@@ -1,0 +1,39 @@
+# Optional single-Vault service; deliberately not included by the main Compose.
+services:
+  biography-worker:
+    image: ${DJ_BIOGRAPHY_IMAGE:?Pin the verified backend image digest}
+    profiles: [biography]
+    restart: "on-failure:3"
+    stop_grace_period: 75s
+    cpus: 0.5
+    mem_limit: 384m
+    init: true
+    env_file:
+      - ${DJ_BIOGRAPHY_ENV_FILE:-../.env}
+    environment:
+      STORE_BACKEND: postgres
+      OWNER_TRUTH_BIOGRAPHY_TOPICS_ENABLED: ${DJ_BIOGRAPHY_ENABLED:-false}
+      DJ_BIOGRAPHY_VAULT_ID: ${DJ_BIOGRAPHY_VAULT_ID:-}
+      DJ_BIOGRAPHY_OWNER_SUBJECT_ID: ${DJ_BIOGRAPHY_OWNER_SUBJECT_ID:-}
+      DB_POOL_MIN_SIZE: "1"
+      DB_POOL_MAX_SIZE: "2"
+    command:
+      - sh
+      - -ec
+      - |
+        test -n "$$DJ_BIOGRAPHY_VAULT_ID" || { echo 'Missing biography Vault scope' >&2; exit 78; }
+        test -n "$$DJ_BIOGRAPHY_OWNER_SUBJECT_ID" || { echo 'Missing biography owner scope' >&2; exit 78; }
+        exec python -m app.async_effects.owner_truth_biography_worker \
+          --vault-id "$$DJ_BIOGRAPHY_VAULT_ID" \
+          --owner-subject-id "$$DJ_BIOGRAPHY_OWNER_SUBJECT_ID" \
+          --watch --poll-seconds 30 --max-jobs 1
+    networks: [backend]
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+networks:
+  backend:
+    external: true
+    name: ${DJ_BACKEND_NETWORK:-dreamjourneybackend_default}

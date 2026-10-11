@@ -1,0 +1,140 @@
+{
+  "block": {
+    "text": "我把折纸放在白色收纳盒里每周日下午在家练习折纸",
+    "title": "折纸",
+    "facets": [
+      "habit",
+      "lifeEvent"
+    ],
+    "blockId": "paragraph-17a13fc032da633a9ff1f961",
+    "topicId": "topic-17a13fc032da633a9ff1f961",
+    "evidence": [
+      {
+        "memoryId": "80841f0b-afc4-520f-8d8f-f37322bea421",
+        "sourceId": "359b40c6-931a-4f79-b383-b90b8d7826b1",
+        "contentHash": "18e0268e7f666c01638e4260780984a34fe8ffa1806d8dbbc581cdf7d3e13161",
+        "sourceVersion": 1,
+        "memoryVersionId": "00e29530-76a5-5588-b20e-9b4fa576a577"
+      },
+      {
+        "memoryId": "7d921e9d-6dad-50d6-80e4-ac4baf4b0826",
+        "sourceId": "263124a9-f04d-4921-83ef-9e7134564554",
+        "contentHash": "c986658325e6b55a06c44462944ab2420af1bf7dd2bfb5425a53b42c3a722121",
+        "sourceVersion": 1,
+        "memoryVersionId": "c01fdb48-63ea-5a13-af43-8cf68a075ffc"
+      }
+    ],
+    "blockType": "narrative",
+    "sentences": [
+      {
+        "text": "我把折纸放在白色收纳盒里",
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": null
+        },
+        "evidence": [
+          {
+            "memoryId": "80841f0b-afc4-520f-8d8f-f37322bea421",
+            "sourceId": "359b40c6-931a-4f79-b383-b90b8d7826b1",
+            "contentHash": "18e0268e7f666c01638e4260780984a34fe8ffa1806d8dbbc581cdf7d3e13161",
+            "sourceVersion": 1,
+            "memoryVersionId": "00e29530-76a5-5588-b20e-9b4fa576a577"
+          }
+        ],
+        "qualifiers": {
+          "place": null,
+          "polarity": "neutral",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "unknown"
+        },
+        "sentenceId": "sentence-474b436c31eede33b3f2d584"
+      },
+      {
+        "text": "每周日下午在家练习折纸",
+        "time": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": "每周日下午"
+        },
+        "evidence": [
+          {
+            "memoryId": "7d921e9d-6dad-50d6-80e4-ac4baf4b0826",
+            "sourceId": "263124a9-f04d-4921-83ef-9e7134564554",
+            "contentHash": "c986658325e6b55a06c44462944ab2420af1bf7dd2bfb5425a53b42c3a722121",
+            "sourceVersion": 1,
+            "memoryVersionId": "c01fdb48-63ea-5a13-af43-8cf68a075ffc"
+          }
+        ],
+        "qualifiers": {
+          "place": {
+            "label": "家",
+            "category": null,
+            "entityId": null
+          },
+          "polarity": "neutral",
+          "scenario": null,
+          "validTime": {
+            "end": null,
+            "start": null,
+            "precision": "unknown",
+            "expression": "每周日下午"
+          },
+          "strengthExpression": null,
+          "superlativeAsserted": false,
+          "currentApplicability": "current"
+        },
+        "sentenceId": "sentence-8930b03c4b950ac48cd4e9fe"
+      }
+    ],
+    "qualityState": "faithful",
+    "promptVersion": "evidence-polish-v4",
+    "sourceRevision": "7d765a97c8e5f6839ef1a515c5252b2496d58c7e3fd581ef2a52ecbbff512f3f",
+    "uncoveredFacts": [],
+    "algorithmVersion": "topic-biography-v4",
+    "modelConfigVersion": "reviewed-polish-v2"
+  },
+  "response": {
+    "sentences": [
+      {
+        "text": "我把折纸放在白色收纳盒里，每周日下午在家练习折纸。",
+        "sourceSentenceIds": [
+          "sentence-474b436c31eede33b3f2d584",
+          "sentence-8930b03c4b950ac48cd4e9fe"
+        ]
+      }
+    ],
+    "audit": {
+      "verdict": "supported",
+      "facts": [
+        {
+          "sentenceId": "sentence-474b436c31eede33b3f2d584",
+          "covered": true,
+          "qualifiersPreserved": true
+        },
+        {
+          "sentenceId": "sentence-8930b03c4b950ac48cd4e9fe",
+          "covered": true,
+          "qualifiersPreserved": true
+        }
+      ],
+      "sentences": [
+        {
+          "index": 0,
+          "supported": true
+        }
+      ],
+      "issues": []
+    }
+  }
+}
