@@ -50,7 +50,7 @@ class Model(BaseHTTPRequestHandler):
         else:
             text = ('我偶尔喜欢喝咖啡，大学时也偶尔喝它提神。' if '咖啡' in original['title']
                     else '我打算整理照片，也喜欢用相册来整理它们。')
-            value = dict(sentences=[dict(text=text, sourceSentenceIds=ids)])
+            value = dict(paragraph=text, sentences=[dict(text=text, sourceSentenceIds=ids)])
         calls.append(dict(stage='audit' if audit else 'write', title=original['title']))
         data = json.dumps(dict(model='local-controlled', choices=[dict(message=dict(content=json.dumps(value, ensure_ascii=False)))]), ensure_ascii=False).encode()
         self.send_response(200); self.send_header('Content-Type', 'application/json')

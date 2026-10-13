@@ -58,15 +58,20 @@ class S4CompositionTests(unittest.TestCase):
                'sentences':[{'index':0,'supported':True}],'issues':[]}
         def handle(request):
             body=json.loads(request.content);seen.append(body)
-            value=draft if len(seen)==1 else audit
+            value=json.loads(json.dumps(draft if len(seen)==1 else audit))
+            if len(seen)==1:
+                value['sentences'][0]['sourceSentenceIds']=['f1','f2']
+                value['paragraph']=''.join(x['text'] for x in value['sentences'])
+            else:
+                for i,f in enumerate(value['facts']):f['sentenceId']='f'+str(i+1)
             return httpx.Response(200,json={'model':'deepseek-flash','choices':[{'message':{'content':json.dumps(value)}}]})
         with patch('app.async_effects.owner_truth_biography_worker.httpx.Client',side_effect=lambda **kw:client(transport=httpx.MockTransport(handle),**kw)):
             composer=DeepSeekBiographyComposer(replace(Settings(),deepseek_api_key='synthetic'))
             result=composer(self.block)
         self.assertEqual(result,dict(draft,audit=audit));self.assertEqual(len(seen),2)
-        sent=json.loads(seen[0]['messages'][1]['content']);self.assertEqual([s['sentenceId'] for s in sent['sentences']],self.ids)
+        sent=json.loads(seen[0]['messages'][1]['content']);self.assertEqual([s['sentenceId'] for s in sent['sentences']],['f1','f2'])
         review=json.loads(seen[1]['messages'][1]['content']);self.assertEqual(review['original'],sent)
-        self.assertEqual(review['proposed'],draft)
+        self.assertEqual(review['proposed']['sentences'][0]['sourceSentenceIds'],['f1','f2']);self.assertEqual(review['proposed']['sentences'][0]['text'],draft['sentences'][0]['text'])
         self.assertEqual(seen[0]['model'],'deepseek-chat')
         self.assertEqual(composer.last_metadata['requests'][1]['reportedModel'],'deepseek-flash')
         self.assertEqual(apply_composition(self.block,result)['qualityState'],'polished')

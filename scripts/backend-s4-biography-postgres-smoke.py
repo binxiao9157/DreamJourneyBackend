@@ -99,6 +99,8 @@ try:
  assert BiographyWorker(store,late).run_once(context=context)['status']=='obsolete'
  checks.append('concurrent confirmation during model call rejects stale completion')
  def invalid(block):return {'sentenceIds':['invented-version']}
+ assert BiographyWorker(store,invalid).run_once(context=context)['status']=='pending'
+ with psycopg.connect(dsn) as c:c.execute("UPDATE owner_truth.biography_topic_jobs SET available_at=NOW()-INTERVAL '1 second' WHERE state='pending'")
  assert BiographyWorker(store,invalid).run_once(context=context)['status']=='fallback'
  checks.append('invalid provider reference falls back without undoing formal confirmation')
  # Claimed job survives a lost worker and its attempt is not reset.
@@ -196,6 +198,8 @@ os._exit(77)
   return {'sentences':[{'text':''.join(s['text'] for s in block['sentences']),'sourceSentenceIds':ids}],
           'audit':{'verdict':'supported','facts':[{'sentenceId':x,'covered':True,'qualifiersPreserved':True} for x in ids],
                    'sentences':[{'index':0,'supported':True}],'issues':[]}}
+ assert BiographyWorker(store,verbatim).run_once(context=context)['status']=='pending'
+ with psycopg.connect(dsn) as c:c.execute("UPDATE owner_truth.biography_topic_jobs SET available_at=NOW()-INTERVAL '1 second' WHERE state='pending'")
  assert BiographyWorker(store,verbatim).run_once(context=context)['status']=='fallback'
  with psycopg.connect(dsn) as c:
   assert c.execute("SELECT count(*) FROM owner_truth.biography_topic_jobs WHERE error_code='compositionNotIntegrated'").fetchone()[0]==1

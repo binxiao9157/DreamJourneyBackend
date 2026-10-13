@@ -13,8 +13,9 @@ import re
 ALGORITHM = 'topic-biography-v5-confirmed-groups'
 MAX_SENTENCES = 20
 MAX_INPUT_CHARACTERS = 12000
-PROMPT_VERSION = 'evidence-polish-v7'
+PROMPT_VERSION = 'evidence-polish-v10-paragraph-first'
 MODEL_CONFIG_VERSION = 'reviewed-polish-v2'
+PHOTO_GROUPING_VERSION = 'photo-confirmed-scope-v1'
 TOPICS = (
     ('coffee', '咖啡习惯', ('咖啡',), 'daily-habits', '饮食与日常习惯'),
     ('birth', '出生', ('出生', '生日'), 'roots', '个人经历'),
@@ -87,7 +88,15 @@ def identity(record, binding=None):
     text = record['narrative']
     subject = subject_identity(record)
     matches = [t for t in TOPICS if any(word in text for word in t[2])]
-    if len(matches) == 1:
+    if len(matches) == 1 and matches[0][0] == 'photos':
+        # Photography is a category, not evidence that two objects are the same.
+        # Keep anaphora with their verified confirmed topic. Without that proof,
+        # preserve an independent fact instead of mixing unrelated photo sets.
+        if binding is not None:
+            key, title, section, section_title = 'confirmed:' + binding['topicId'], binding['title'], 'interests', '兴趣与生活'
+        else:
+            key, title, section, section_title = 'fact:' + record['memoryId'], '记忆片段', 'life-fragments', '人生片段'
+    elif len(matches) == 1:
         key, title, _, section, section_title = matches[0]
     elif binding is not None:
         key, title, section, section_title = 'confirmed:' + binding['topicId'], binding['title'], 'interests', '兴趣与生活'
@@ -149,10 +158,18 @@ def build_biography(records, source_fingerprint, previous=None, *, model_config=
         if binding is not None:
             group['bindings'][record['memoryId']] = binding
 
+    from app.domain.owner_truth.biography_object_links import resolve_groups
+    groups = resolve_groups(groups, subject_identity)
+    for group in groups.values():
+        if group.get('objectLinks'):
+            group['objectLinkFingerprint'] = digest(group['objectLinks'])
+
     def make_block(topic, group, material, index, count):
         block_topic = topic if count == 1 else topic + '-part-' + str(index)
         proof = [group['bindings'][r['memoryId']] for r in material if r['memoryId'] in group['bindings']]
         grouping = digest(sorted(proof, key=lambda b: b['memoryId']))
+        if group.get('objectLinkFingerprint'):
+            grouping = digest({'bindings': grouping, 'objectLinks': group['objectLinkFingerprint']})
         fingerprint = digest({'versions': sorted((r['memoryId'], r['memoryVersionId'], r['contentHash']) for r in material),
                               'group': topic, 'title': group['title'], 'grouping': grouping, 'part': [index, count],
                               'algorithm': ALGORITHM, 'prompt': PROMPT_VERSION, 'model': model_config})
@@ -237,7 +254,7 @@ def apply_polish(block, response):
     if not isinstance(generated, list) or not 1 <= len(generated) <= len(inputs) * 2:
         raise ValueError('invalid polished sentence count')
     if not isinstance(audit, dict) or set(audit) != {'verdict', 'facts', 'sentences', 'issues'} or audit['verdict'] != 'supported' or audit['issues'] != []:
-        raise ValueError('semantic audit did not approve')
+        raise ValueError('semantic audit uncertain' if isinstance(audit, dict) and audit.get('verdict') == 'uncertain' else 'semantic audit did not approve')
     facts = audit['facts']
     if not isinstance(facts, list) or len(facts) != len(inputs) or any(
         not isinstance(f, dict) or set(f) != {'sentenceId', 'covered', 'qualifiersPreserved'}
@@ -303,3 +320,58 @@ def apply_polish(block, response):
             raise ValueError('compositionNotIntegrated')
     result=deepcopy(block);result['sentences']=output;result['text']=text;result['qualityState']='polished'
     return result
+
+
+def retain_valid_composition(current, old, response):
+    """Reuse old prose only when ALL its supporting inputs are still identical.
+
+    Never surgically drop a sentence: a later sentence can depend on its subject
+    or chronology. Any correction/revocation discards the whole old block.
+    """
+    if not isinstance(old, dict) or any(old.get(k) != current.get(k) for k in ('topicId', 'groupId', 'title')):
+        raise ValueError('retainedTopicMismatch')
+    inputs = {s['sentenceId']: s for s in current['sentences']}
+    originals = old.get('sentences', [])
+    if not originals or len({s['sentenceId'] for s in originals}) != len(originals):
+        raise ValueError('retainedIdentityMismatch')
+    if any(inputs.get(s['sentenceId']) != s for s in originals):
+        raise ValueError('retainedEvidenceChanged')
+    composed = apply_composition(old, response)
+    if composed['qualityState'] != 'polished':
+        raise ValueError('retainedNotPolished')
+    covered = {s['sentenceId'] for s in originals}
+    added = [deepcopy(s) for s in current['sentences'] if s['sentenceId'] not in covered]
+    result = deepcopy(current)
+    result['sentences'] = deepcopy(composed['sentences']) + added
+    result['text'] = composed['text'] + ''.join(s['text'] for s in added)
+    result['qualityState'] = 'retainedWithAdditions' if added else 'retained'
+    return result
+
+
+def composition_error_code(error):
+    """Closed diagnostic vocabulary: never persist arbitrary exception text."""
+    message = str(error)
+    exact = {
+        'compositionNotIntegrated': 'compositionNotIntegrated',
+        'responseTruncated': 'responseTruncated',
+        'permanentProviderFailure': 'providerRejected',
+        'providerNotConfigured': 'providerNotConfigured',
+        'semantic audit uncertain': 'auditUncertain',
+        'semantic audit did not approve': 'auditRejected',
+        'compositionInputBudgetExceeded': 'compositionInputBudgetExceeded',
+    }
+    if message in exact:
+        return exact[message]
+    if message in {'invalidWriterShape', 'invalidWriterCount', 'invalidWriterSentence'}:
+        return 'writerShape'
+    if message in {'invalidWriterEvidence', 'incompleteWriterCoverage', 'invalidAuditIdentity'}:
+        return 'writerReferences' if message != 'invalidAuditIdentity' else 'auditShape'
+    if message.startswith('semantic audit missing') or message == 'invalid polish shape':
+        return 'auditShape'
+    if message in {'polish dropped a key qualifier', 'polish dropped negation', 'polish moved source timing/frequency',
+                   'polish dropped time/frequency/numeric evidence', 'relative time lost its expression anchor',
+                   'polish invented a numeric fact'}:
+        return 'qualifierMismatch'
+    if message in {'polish omitted a confirmed fact', 'unknown/duplicate polished reference', 'composition does not cover exact sentence identities'}:
+        return 'factCoverage'
+    return 'invalidComposition'

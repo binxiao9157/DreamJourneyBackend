@@ -9,17 +9,19 @@ from uuid import uuid4
 import json
 from psycopg.types.json import Jsonb
 from psycopg.rows import dict_row
-from app.domain.owner_truth.person_biography import apply_composition, digest, MODEL_CONFIG_VERSION, MAX_SENTENCES, MAX_INPUT_CHARACTERS, input_within_budget
+from app.domain.owner_truth.person_biography import apply_composition, digest, MODEL_CONFIG_VERSION, MAX_SENTENCES, MAX_INPUT_CHARACTERS, input_within_budget, retain_valid_composition, composition_error_code
 
 MAX_ATTEMPTS = 2
 LEASE_SECONDS = 90
+REPAIRABLE_COMPOSITION_ERRORS = frozenset({'compositionNotIntegrated', 'auditRejected', 'auditUncertain',
+    'writerShape', 'writerReferences', 'auditShape', 'factCoverage', 'qualifierMismatch', 'responseTruncated'})
 
 
 def biography_model_config(settings):
     # Includes configured transport identity without logging its potentially
     # private URL. A configuration change cannot reuse prior model output.
     return MODEL_CONFIG_VERSION + ":" + digest({"endpoint": settings.deepseek_base_url,
-        "model": "deepseek-chat", "temperature": 0, "maxTokens": 1800})[:24]
+        "model": "deepseek-chat", "temperature": 0, "maxTokens": 4096})[:24]
 
 
 class PostgresBiographyRepository:
@@ -139,18 +141,48 @@ class PostgresBiographyRepository:
                 (context.vault_id,context.owner_subject_id,Jsonb(keys)))
             return {(row['topic_id'],row['source_revision']):row['result'] for row in cursor.fetchall()}
 
+    def retained_many(self, *, context, blocks):
+        # Per-topic index lookup; bounded history, no account-wide prose scan.
+        keys = [[b['topicId'], b['sourceRevision']] for b in blocks]
+        if not keys:
+            return {}
+        with self.connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("""SELECT k->>0 AS topic_id, prior.payload, prior.result
+                FROM jsonb_array_elements(%s::jsonb) k
+                CROSS JOIN LATERAL (
+                    SELECT payload,result FROM owner_truth.biography_topic_jobs j
+                    WHERE vault_id=%s AND owner_subject_id=%s AND state='ready'
+                      AND topic_id=k->>0 AND source_revision<>k->>1
+                    ORDER BY created_at DESC,source_revision LIMIT 3
+                ) prior""", (Jsonb(keys), context.vault_id, context.owner_subject_id))
+            result = {}
+            for row in cursor.fetchall():
+                result.setdefault(row['topic_id'], []).append(dict(payload=row['payload'], result=row['result']))
+            return result
+
 def read_composed_model(repository, *, context, model):
     result = deepcopy(model)
     biography = result['biographyProjection']
     artifacts = repository.completed_many(context=context, blocks=[b for s in biography['sections'] for b in s['blocks']])
+    missing = []
     for section in biography['sections']:
         for i, block in enumerate(section['blocks']):
             response = artifacts.get((block['topicId'], block['sourceRevision']))
             if response is not None:
                 try:
                     section['blocks'][i] = apply_composition(block, response)
+                    continue
                 except (ValueError, TypeError, KeyError):
-                    pass  # Corrupt artifact cannot leak into the authoritative read.
+                    pass
+            missing.append((section, i, block))
+    history = repository.retained_many(context=context, blocks=[b for _, _, b in missing]) if missing else {}
+    for section, i, block in missing:
+        for prior in history.get(block['topicId'], [])[:3]:
+            try:
+                section['blocks'][i] = retain_valid_composition(block, prior['payload'], prior['result'])
+                break
+            except (ValueError, TypeError, KeyError):
+                continue
     biography['documentVersion'] = digest({k:v for k,v in biography.items() if k != 'documentVersion'})
     result['modelVersion'] = digest({k:v for k,v in result.items() if k != 'modelVersion'})
     return result
@@ -197,14 +229,19 @@ class BiographyWorker:
                 result = {'sentenceIds': [block['sentences'][0]['sentenceId']]}
             else:
                 used_provider = True
-                result = self.compose(deepcopy(block))
+                material = deepcopy(block)
+                if job['attempts'] > 1 and job.get('error_code') in REPAIRABLE_COMPOSITION_ERRORS:
+                    material['compositionFeedback'] = job['error_code']
+                result = self.compose(material)
             apply_composition(block, result)
         except (TimeoutError, ConnectionError):
             state = 'pending' if job['attempts'] < MAX_ATTEMPTS else 'fallback'
             error = 'providerUnavailable'
         except (ValueError, TypeError, KeyError) as exc:
             state = 'fallback'
-            error = 'compositionNotIntegrated' if str(exc) == 'compositionNotIntegrated' else 'invalidComposition'
+            error = composition_error_code(exc)
+            if error in REPAIRABLE_COMPOSITION_ERRORS and job['attempts'] < MAX_ATTEMPTS:
+                state = 'pending'
         with self._uow():
             current = {b['topicId']:b for b in self._snapshot(context)}
             if current.get(block['topicId'],{}).get('sourceRevision') != job['source_revision']:
@@ -222,7 +259,7 @@ def provider_metadata(compose):
     for item in raw.get('requests', [])[:2]:
         if not isinstance(item, dict):
             continue
-        clean = {k: item[k] for k in ('stage','requestedModel','reportedModel','httpStatus','elapsedSeconds')
+        clean = {k: item[k] for k in ('stage','requestedModel','reportedModel','httpStatus','elapsedSeconds','finishReason')
                  if k in item and isinstance(item[k], (str,int,float))}
         clean = {k: (v[:120] if isinstance(v,str) else v) for k,v in clean.items()}
         usage = item.get('usage', {})

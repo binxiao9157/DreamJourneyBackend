@@ -118,6 +118,7 @@ try:
             elif target:
                 value=dict(sentences=[dict(text='我每周三在社区教书法，也用绿色本子记录这门书法课的教学进度。',sourceSentenceIds=ids)])
             else:value=dict(sentences=[dict(text=s['text'],sourceSentenceIds=[s['sentenceId']]) for s in raw['sentences']])
+            if 'original' not in material:value['paragraph']=''.join(s['text'] for s in value['sentences'])
             data=json.dumps(dict(model='local-controlled',choices=[dict(message=dict(content=json.dumps(value,ensure_ascii=False)))]),ensure_ascii=False).encode()
             self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
     server=ThreadingHTTPServer(('127.0.0.1',0),Model);Thread(target=server.serve_forever,daemon=True).start()

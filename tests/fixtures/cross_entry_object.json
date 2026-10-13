@@ -1,0 +1,295 @@
+{
+  "description": "run-02 device synthetic content; local identities, exact content and null/typed object shapes",
+  "contents": [
+    {
+      "time": {
+        "end": null,
+        "start": null,
+        "precision": "unknown"
+      },
+      "event": "我把一个手摇音乐盒放在玄关的木柜上。",
+      "affect": null,
+      "facets": {
+        "time": [],
+        "goals": [],
+        "habits": [],
+        "people": [],
+        "places": [
+          {
+            "value": "玄关的木柜上",
+            "confidence": 1.0,
+            "evidenceMode": "ownerStated",
+            "sourceTurnIndices": [
+              1
+            ]
+          }
+        ],
+        "values": [],
+        "emotions": [],
+        "identity": [],
+        "confidence": 0.9,
+        "personality": [],
+        "reflections": [],
+        "relationships": []
+      },
+      "object": null,
+      "summary": "我把一个手摇音乐盒放在玄关的木柜上。",
+      "factType": "event",
+      "semantic": {
+        "title": "我把一个手摇音乐盒放在玄关的木柜上",
+        "facets": [
+          "lifeEvent"
+        ],
+        "entities": [
+          {
+            "name": "玄关的木柜上",
+            "confidence": 1.0,
+            "entityType": "place",
+            "evidenceMode": "ownerStated"
+          }
+        ],
+        "eventTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "narrative": "我把一个手摇音乐盒放在玄关的木柜上。",
+        "primaryKind": "lifeEvent",
+        "emotionEvidence": []
+      },
+      "predicate": "occurred",
+      "statement": "我把一个手摇音乐盒放在玄关的木柜上。",
+      "dimensions": [
+        "lifeEvents"
+      ],
+      "provenance": {
+        "mode": "selfReport",
+        "evidenceRefs": [
+          {
+            "turnId": null,
+            "relation": "supports",
+            "sourceId": "20000000-0000-0000-0000-000000000001",
+            "sourceVersion": 1
+          }
+        ],
+        "speakerPersonId": null,
+        "contributorAccountId": null
+      },
+      "qualifiers": {
+        "place": {
+          "label": "玄关的木柜上",
+          "category": null,
+          "entityId": null
+        },
+        "polarity": "unknown",
+        "scenario": null,
+        "validTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": null
+        },
+        "strengthExpression": null,
+        "superlativeAsserted": false,
+        "currentApplicability": "historical"
+      },
+      "claimSubjectId": null,
+      "memorySubjectId": null,
+      "sourceTurnIndices": [
+        1
+      ]
+    },
+    {
+      "claim": "这个手摇音乐盒是深蓝色的。",
+      "affect": null,
+      "facets": {
+        "time": [],
+        "goals": [],
+        "habits": [],
+        "people": [],
+        "places": [],
+        "values": [],
+        "emotions": [],
+        "identity": [],
+        "confidence": 0.9,
+        "personality": [],
+        "reflections": [],
+        "relationships": []
+      },
+      "object": null,
+      "domains": [],
+      "factType": "attribute",
+      "semantic": {
+        "title": "这个手摇音乐盒是深蓝色的",
+        "facets": [
+          "knowledge"
+        ],
+        "entities": [],
+        "eventTime": null,
+        "narrative": "这个手摇音乐盒是深蓝色的。",
+        "primaryKind": "knowledge",
+        "emotionEvidence": []
+      },
+      "predicate": "states",
+      "statement": "这个手摇音乐盒是深蓝色的。",
+      "dimensions": [
+        "identity",
+        "knowledgeSkills"
+      ],
+      "provenance": {
+        "mode": "selfReport",
+        "evidenceRefs": [
+          {
+            "turnId": null,
+            "relation": "supports",
+            "sourceId": "20000000-0000-0000-0000-000000000002",
+            "sourceVersion": 1
+          }
+        ],
+        "speakerPersonId": null,
+        "contributorAccountId": null
+      },
+      "qualifiers": {
+        "place": null,
+        "polarity": "unknown",
+        "scenario": null,
+        "validTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": null
+        },
+        "strengthExpression": null,
+        "superlativeAsserted": false,
+        "currentApplicability": "unknown"
+      },
+      "knowledgeType": "personal_experience",
+      "claimSubjectId": null,
+      "memorySubjectId": null,
+      "sourceTurnIndices": [
+        3
+      ]
+    },
+    {
+      "time": {
+        "end": null,
+        "start": null,
+        "precision": "unknown"
+      },
+      "event": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+      "affect": null,
+      "facets": {
+        "time": [
+          {
+            "value": "每周日晚上",
+            "confidence": 1.0,
+            "evidenceMode": "ownerStated"
+          }
+        ],
+        "goals": [],
+        "habits": [
+          {
+            "value": "我每周日晚上转动它的手柄，听一小段音乐",
+            "confidence": 1.0,
+            "evidenceMode": "ownerStated"
+          }
+        ],
+        "people": [],
+        "places": [
+          {
+            "value": "玄关木柜上",
+            "confidence": 1.0,
+            "evidenceMode": "ownerStated"
+          }
+        ],
+        "values": [],
+        "emotions": [],
+        "identity": [],
+        "confidence": 0.9,
+        "personality": [],
+        "reflections": [],
+        "relationships": []
+      },
+      "object": {
+        "label": "深蓝色手摇音乐盒",
+        "category": null,
+        "entityId": null
+      },
+      "actions": [
+        "转动它的手柄",
+        "听一小段音乐"
+      ],
+      "outcome": null,
+      "factType": "habit",
+      "location": "玄关木柜上",
+      "semantic": {
+        "title": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐",
+        "facets": [
+          "lifeEvent",
+          "habit"
+        ],
+        "entities": [
+          {
+            "name": "玄关木柜上",
+            "confidence": 1.0,
+            "entityType": "place",
+            "evidenceMode": "ownerStated"
+          }
+        ],
+        "eventTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown"
+        },
+        "narrative": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+        "primaryKind": "lifeEvent",
+        "emotionEvidence": []
+      },
+      "predicate": "转动手柄并听音乐",
+      "statement": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+      "dimensions": [
+        "lifeEvents",
+        "habits"
+      ],
+      "provenance": {
+        "mode": "selfReport",
+        "evidenceRefs": [
+          {
+            "turnId": null,
+            "relation": "supports",
+            "sourceId": "20000000-0000-0000-0000-000000000003",
+            "sourceVersion": 1
+          }
+        ],
+        "speakerPersonId": null,
+        "contributorAccountId": null
+      },
+      "qualifiers": {
+        "place": {
+          "label": "玄关木柜上",
+          "category": null,
+          "entityId": null
+        },
+        "polarity": "neutral",
+        "scenario": null,
+        "validTime": {
+          "end": null,
+          "start": null,
+          "precision": "unknown",
+          "expression": "每周日晚上"
+        },
+        "strengthExpression": null,
+        "superlativeAsserted": false,
+        "currentApplicability": "current"
+      },
+      "participants": [],
+      "claimSubjectId": null,
+      "memorySubjectId": null
+    }
+  ],
+  "kinds": [
+    "experience",
+    "knowledge",
+    "experience"
+  ]
+}

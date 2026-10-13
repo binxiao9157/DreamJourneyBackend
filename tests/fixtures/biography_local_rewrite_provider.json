@@ -1,0 +1,801 @@
+[
+  {
+    "case": "provider-v8/provider-1.json",
+    "block": {
+      "topicId": "topic-66ef260edb54feb47082c219",
+      "groupId": "topic-66ef260edb54feb47082c219",
+      "partIndex": 0,
+      "partCount": 1,
+      "groupingFingerprint": "602c4d815834ee945d114fa224855cedb972b1b716656c2dc9ab78e07c930c55",
+      "blockId": "paragraph-66ef260edb54feb47082c219",
+      "blockType": "narrative",
+      "title": "咖啡习惯",
+      "text": "2024年因为工作忙，我重新开始喝咖啡。大学备考时，我喝咖啡提神。我偶尔在上午喝咖啡。毕业后，我停喝过一段时间咖啡。",
+      "sentences": [
+        {
+          "sentenceId": "sentence-387db8bb34e491550da802a1",
+          "text": "2024年因为工作忙，我重新开始喝咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000003",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000003",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000003",
+              "sourceId": "20000000-0000-0000-0000-000000000003",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+          "text": "大学备考时，我喝咖啡提神。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000001",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+              "sourceId": "20000000-0000-0000-0000-000000000001",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-153e6c14923ad71a0f36afc4",
+          "text": "我偶尔在上午喝咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000004",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000004",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000004",
+              "sourceId": "20000000-0000-0000-0000-000000000004",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+          "text": "毕业后，我停喝过一段时间咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000002",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+              "sourceId": "20000000-0000-0000-0000-000000000002",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        }
+      ],
+      "evidence": [
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000003",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000003",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000003",
+          "sourceId": "20000000-0000-0000-0000-000000000003",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000001",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+          "sourceId": "20000000-0000-0000-0000-000000000001",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000004",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000004",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000004",
+          "sourceId": "20000000-0000-0000-0000-000000000004",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000002",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+          "sourceId": "20000000-0000-0000-0000-000000000002",
+          "sourceVersion": 1
+        }
+      ],
+      "facets": [
+        "lifeEvent"
+      ],
+      "sourceRevision": "2c816fd308327d1425669937f43787cff3ec5fa71ffece574df9eafde5c3a62a",
+      "algorithmVersion": "topic-biography-v5-confirmed-groups",
+      "promptVersion": "evidence-polish-v10-paragraph-first",
+      "modelConfigVersion": "reviewed-polish-v2",
+      "qualityState": "faithful",
+      "uncoveredFacts": []
+    },
+    "response": {
+      "sentences": [
+        {
+          "text": "大学备考时，我喝咖啡提神。",
+          "sourceSentenceIds": [
+            "sentence-5d49ba04563105cdbbf8a194"
+          ]
+        },
+        {
+          "text": "毕业后，我停喝过一段时间咖啡。",
+          "sourceSentenceIds": [
+            "sentence-b07c3f2a44ed8bf672d9a84d"
+          ]
+        },
+        {
+          "text": "2024年因为工作忙，我重新开始喝咖啡。",
+          "sourceSentenceIds": [
+            "sentence-387db8bb34e491550da802a1"
+          ]
+        },
+        {
+          "text": "我偶尔在上午喝咖啡。",
+          "sourceSentenceIds": [
+            "sentence-153e6c14923ad71a0f36afc4"
+          ]
+        }
+      ],
+      "audit": {
+        "verdict": "supported",
+        "facts": [
+          {
+            "sentenceId": "sentence-387db8bb34e491550da802a1",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-153e6c14923ad71a0f36afc4",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+            "covered": true,
+            "qualifiersPreserved": true
+          }
+        ],
+        "sentences": [
+          {
+            "index": 0,
+            "supported": true
+          },
+          {
+            "index": 1,
+            "supported": true
+          },
+          {
+            "index": 2,
+            "supported": true
+          },
+          {
+            "index": 3,
+            "supported": true
+          }
+        ],
+        "issues": []
+      }
+    },
+    "expected": "compositionNotIntegrated"
+  },
+  {
+    "case": "provider-v9/provider-3.json",
+    "block": {
+      "topicId": "topic-66ef260edb54feb47082c219",
+      "groupId": "topic-66ef260edb54feb47082c219",
+      "partIndex": 0,
+      "partCount": 1,
+      "groupingFingerprint": "41fd78b8f2dfffdd34f7ea5e622647cddd907bea7c0e6375841310556de8f696",
+      "blockId": "paragraph-66ef260edb54feb47082c219",
+      "blockType": "narrative",
+      "title": "咖啡习惯",
+      "text": "大学时，我偶尔喝咖啡。我不在晚上喝咖啡。我打算周末喝咖啡，但还没有开始。",
+      "sentences": [
+        {
+          "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+          "text": "大学时，我偶尔喝咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000001",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+              "sourceId": "20000000-0000-0000-0000-000000000001",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-387db8bb34e491550da802a1",
+          "text": "我不在晚上喝咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000003",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000003",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000003",
+              "sourceId": "20000000-0000-0000-0000-000000000003",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+          "text": "我打算周末喝咖啡，但还没有开始。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000002",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+              "sourceId": "20000000-0000-0000-0000-000000000002",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        }
+      ],
+      "evidence": [
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000001",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+          "sourceId": "20000000-0000-0000-0000-000000000001",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000003",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000003",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000003",
+          "sourceId": "20000000-0000-0000-0000-000000000003",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000002",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+          "sourceId": "20000000-0000-0000-0000-000000000002",
+          "sourceVersion": 1
+        }
+      ],
+      "facets": [
+        "lifeEvent"
+      ],
+      "sourceRevision": "dbdb589ca2d1be71fafa084506c883d111c876706ed0e4cf3dea58d88597a930",
+      "algorithmVersion": "topic-biography-v5-confirmed-groups",
+      "promptVersion": "evidence-polish-v10-paragraph-first",
+      "modelConfigVersion": "reviewed-polish-v2",
+      "qualityState": "faithful",
+      "uncoveredFacts": []
+    },
+    "response": {
+      "sentences": [
+        {
+          "text": "大学时，我会偶尔喝咖啡。",
+          "sourceSentenceIds": [
+            "sentence-5d49ba04563105cdbbf8a194"
+          ]
+        },
+        {
+          "text": "喝咖啡时我避开晚上。",
+          "sourceSentenceIds": [
+            "sentence-387db8bb34e491550da802a1"
+          ]
+        },
+        {
+          "text": "至于周末喝咖啡的打算，我还没有开始。",
+          "sourceSentenceIds": [
+            "sentence-b07c3f2a44ed8bf672d9a84d"
+          ]
+        }
+      ],
+      "audit": {
+        "verdict": "supported",
+        "facts": [
+          {
+            "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-387db8bb34e491550da802a1",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+            "covered": true,
+            "qualifiersPreserved": true
+          }
+        ],
+        "sentences": [
+          {
+            "index": 0,
+            "supported": true
+          },
+          {
+            "index": 1,
+            "supported": true
+          },
+          {
+            "index": 2,
+            "supported": true
+          }
+        ],
+        "issues": []
+      }
+    },
+    "expected": "qualifierMismatch"
+  },
+  {
+    "case": "provider-8.json",
+    "block": {
+      "topicId": "topic-66ef260edb54feb47082c219",
+      "groupId": "topic-66ef260edb54feb47082c219",
+      "partIndex": 0,
+      "partCount": 1,
+      "groupingFingerprint": "41fe9d47ced85b542ed425f22caf22c6d69e12d65d8ee2a6d7181d0abfdbebb7",
+      "blockId": "paragraph-66ef260edb54feb47082c219",
+      "blockType": "narrative",
+      "title": "咖啡习惯",
+      "text": "我用白色瓷杯喝咖啡。原记录中提到：“最近两年，我偶尔在上午喝咖啡”。",
+      "sentences": [
+        {
+          "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+          "text": "我用白色瓷杯喝咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000002",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+              "sourceId": "20000000-0000-0000-0000-000000000002",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+          "text": "原记录中提到：“最近两年，我偶尔在上午喝咖啡”。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000001",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+              "sourceId": "20000000-0000-0000-0000-000000000001",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        }
+      ],
+      "evidence": [
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000002",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+          "sourceId": "20000000-0000-0000-0000-000000000002",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000001",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+          "sourceId": "20000000-0000-0000-0000-000000000001",
+          "sourceVersion": 1
+        }
+      ],
+      "facets": [
+        "lifeEvent"
+      ],
+      "sourceRevision": "47498d932d1dfecbf7d63dfa27cf351bdbbd955447ee8202bf279085cfd5fb67",
+      "algorithmVersion": "topic-biography-v5-confirmed-groups",
+      "promptVersion": "evidence-polish-v10-paragraph-first",
+      "modelConfigVersion": "reviewed-polish-v2",
+      "qualityState": "faithful",
+      "uncoveredFacts": []
+    },
+    "response": {
+      "sentences": [
+        {
+          "text": "我用白色瓷杯喝咖啡。",
+          "sourceSentenceIds": [
+            "sentence-b07c3f2a44ed8bf672d9a84d"
+          ]
+        },
+        {
+          "text": "最近两年，我偶尔在上午喝咖啡。",
+          "sourceSentenceIds": [
+            "sentence-5d49ba04563105cdbbf8a194"
+          ]
+        }
+      ],
+      "audit": {
+        "verdict": "rejected",
+        "facts": [
+          {
+            "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+            "covered": true,
+            "qualifiersPreserved": false
+          }
+        ],
+        "sentences": [
+          {
+            "index": 0,
+            "supported": true
+          },
+          {
+            "index": 1,
+            "supported": false
+          }
+        ],
+        "issues": [
+          "f2的relativeTimeUnanchored为true，但输出句1缺少“原记录中提到”“那次”“当时”等回忆锚点，将过去相对时间表述为当前事实。"
+        ]
+      }
+    },
+    "expected": "auditRejected"
+  },
+  {
+    "case": "provider-repair-1.json",
+    "block": {
+      "topicId": "topic-66ef260edb54feb47082c219",
+      "groupId": "topic-66ef260edb54feb47082c219",
+      "partIndex": 0,
+      "partCount": 1,
+      "groupingFingerprint": "602c4d815834ee945d114fa224855cedb972b1b716656c2dc9ab78e07c930c55",
+      "blockId": "paragraph-66ef260edb54feb47082c219",
+      "blockType": "narrative",
+      "title": "咖啡习惯",
+      "text": "2024年因为工作忙，我重新开始喝咖啡。大学备考时，我喝咖啡提神。我偶尔在上午喝咖啡。毕业后，我停喝过一段时间咖啡。",
+      "sentences": [
+        {
+          "sentenceId": "sentence-387db8bb34e491550da802a1",
+          "text": "2024年因为工作忙，我重新开始喝咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000003",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000003",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000003",
+              "sourceId": "20000000-0000-0000-0000-000000000003",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+          "text": "大学备考时，我喝咖啡提神。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000001",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+              "sourceId": "20000000-0000-0000-0000-000000000001",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-153e6c14923ad71a0f36afc4",
+          "text": "我偶尔在上午喝咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000004",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000004",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000004",
+              "sourceId": "20000000-0000-0000-0000-000000000004",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+          "text": "毕业后，我停喝过一段时间咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000002",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+              "sourceId": "20000000-0000-0000-0000-000000000002",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        }
+      ],
+      "evidence": [
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000003",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000003",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000003",
+          "sourceId": "20000000-0000-0000-0000-000000000003",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000001",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+          "sourceId": "20000000-0000-0000-0000-000000000001",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000004",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000004",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000004",
+          "sourceId": "20000000-0000-0000-0000-000000000004",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000002",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+          "sourceId": "20000000-0000-0000-0000-000000000002",
+          "sourceVersion": 1
+        }
+      ],
+      "facets": [
+        "lifeEvent"
+      ],
+      "sourceRevision": "2c816fd308327d1425669937f43787cff3ec5fa71ffece574df9eafde5c3a62a",
+      "algorithmVersion": "topic-biography-v5-confirmed-groups",
+      "promptVersion": "evidence-polish-v10-paragraph-first",
+      "modelConfigVersion": "reviewed-polish-v2",
+      "qualityState": "faithful",
+      "uncoveredFacts": []
+    },
+    "response": {
+      "sentences": [
+        {
+          "text": "大学备考时，我喝咖啡提神；毕业后，我停喝过一段时间咖啡。",
+          "sourceSentenceIds": [
+            "sentence-5d49ba04563105cdbbf8a194",
+            "sentence-b07c3f2a44ed8bf672d9a84d"
+          ]
+        },
+        {
+          "text": "2024年因为工作忙，我重新开始喝咖啡，偶尔在上午喝。",
+          "sourceSentenceIds": [
+            "sentence-387db8bb34e491550da802a1",
+            "sentence-153e6c14923ad71a0f36afc4"
+          ]
+        }
+      ],
+      "audit": {
+        "verdict": "supported",
+        "facts": [
+          {
+            "sentenceId": "sentence-387db8bb34e491550da802a1",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-153e6c14923ad71a0f36afc4",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+            "covered": true,
+            "qualifiersPreserved": true
+          }
+        ],
+        "sentences": [
+          {
+            "index": 0,
+            "supported": true
+          },
+          {
+            "index": 1,
+            "supported": true
+          }
+        ],
+        "issues": []
+      }
+    },
+    "expected": "PASS"
+  },
+  {
+    "case": "provider-repair-8.json",
+    "block": {
+      "topicId": "topic-66ef260edb54feb47082c219",
+      "groupId": "topic-66ef260edb54feb47082c219",
+      "partIndex": 0,
+      "partCount": 1,
+      "groupingFingerprint": "41fe9d47ced85b542ed425f22caf22c6d69e12d65d8ee2a6d7181d0abfdbebb7",
+      "blockId": "paragraph-66ef260edb54feb47082c219",
+      "blockType": "narrative",
+      "title": "咖啡习惯",
+      "text": "我用白色瓷杯喝咖啡。原记录中提到：“最近两年，我偶尔在上午喝咖啡”。",
+      "sentences": [
+        {
+          "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+          "text": "我用白色瓷杯喝咖啡。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000002",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+              "sourceId": "20000000-0000-0000-0000-000000000002",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        },
+        {
+          "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+          "text": "原记录中提到：“最近两年，我偶尔在上午喝咖啡”。",
+          "evidence": [
+            {
+              "memoryId": "00000000-0000-0000-0000-000000000001",
+              "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+              "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+              "sourceId": "20000000-0000-0000-0000-000000000001",
+              "sourceVersion": 1
+            }
+          ],
+          "time": {
+            "start": null,
+            "end": null,
+            "precision": "unknown"
+          },
+          "qualifiers": {}
+        }
+      ],
+      "evidence": [
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000002",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000002",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000002",
+          "sourceId": "20000000-0000-0000-0000-000000000002",
+          "sourceVersion": 1
+        },
+        {
+          "memoryId": "00000000-0000-0000-0000-000000000001",
+          "memoryVersionId": "10000000-0000-0000-0000-000000000001",
+          "contentHash": "0000000000000000000000000000000000000000000000000000000000000001",
+          "sourceId": "20000000-0000-0000-0000-000000000001",
+          "sourceVersion": 1
+        }
+      ],
+      "facets": [
+        "lifeEvent"
+      ],
+      "sourceRevision": "47498d932d1dfecbf7d63dfa27cf351bdbbd955447ee8202bf279085cfd5fb67",
+      "algorithmVersion": "topic-biography-v5-confirmed-groups",
+      "promptVersion": "evidence-polish-v10-paragraph-first",
+      "modelConfigVersion": "reviewed-polish-v2",
+      "qualityState": "faithful",
+      "uncoveredFacts": []
+    },
+    "response": {
+      "sentences": [
+        {
+          "text": "我用白色瓷杯喝咖啡。",
+          "sourceSentenceIds": [
+            "sentence-b07c3f2a44ed8bf672d9a84d"
+          ]
+        },
+        {
+          "text": "当时我提到，最近两年，我偶尔在上午喝咖啡。",
+          "sourceSentenceIds": [
+            "sentence-5d49ba04563105cdbbf8a194"
+          ]
+        }
+      ],
+      "audit": {
+        "verdict": "supported",
+        "facts": [
+          {
+            "sentenceId": "sentence-b07c3f2a44ed8bf672d9a84d",
+            "covered": true,
+            "qualifiersPreserved": true
+          },
+          {
+            "sentenceId": "sentence-5d49ba04563105cdbbf8a194",
+            "covered": true,
+            "qualifiersPreserved": true
+          }
+        ],
+        "sentences": [
+          {
+            "index": 0,
+            "supported": true
+          },
+          {
+            "index": 1,
+            "supported": true
+          }
+        ],
+        "issues": []
+      }
+    },
+    "expected": "PASS"
+  }
+]

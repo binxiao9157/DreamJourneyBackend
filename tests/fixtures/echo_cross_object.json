@@ -1,0 +1,3055 @@
+{
+  "projection": {
+    "state": "ready",
+    "rightsState": "active",
+    "authorityEpoch": 0,
+    "memoryRevision": 1,
+    "checkpoint": "fixture",
+    "entries": [
+      {
+        "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+        "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+        "memoryVersion": 1,
+        "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+        "sourceVersion": 1,
+        "memoryKind": "experience",
+        "perspectiveType": "self",
+        "epistemicStatus": "confirmed",
+        "sensitivity": "standard",
+        "visibility": "owner",
+        "contentSchemaVersion": "owner-truth-v5",
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏。",
+          "affect": null,
+          "facets": {
+            "time": [
+              {
+                "value": "每周日早上",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated",
+                "sourceTurnIndices": [
+                  1
+                ]
+              }
+            ],
+            "goals": [],
+            "habits": [
+              {
+                "value": "每周日早上擦拭书房窗台上的琥珀色沙漏",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated",
+                "sourceTurnIndices": [
+                  1
+                ]
+              }
+            ],
+            "people": [],
+            "places": [
+              {
+                "value": "书房窗台",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated",
+                "sourceTurnIndices": [
+                  1
+                ]
+              }
+            ],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": null,
+          "summary": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏。",
+          "factType": "habit",
+          "semantic": {
+            "title": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "entities": [
+              {
+                "name": "书房窗台",
+                "confidence": 1.0,
+                "entityType": "place",
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "occurred",
+          "statement": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏。",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": {
+              "label": "书房窗台",
+              "category": null,
+              "entityId": null
+            },
+            "polarity": "positive",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": "每周日早上"
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "unknown"
+          },
+          "claimSubjectId": null,
+          "memorySubjectId": null,
+          "sourceTurnIndices": [
+            1
+          ]
+        },
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 22,
+              "start": 0
+            },
+            "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+            "sourceVersion": 1
+          }
+        ],
+        "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+        "citation": {
+          "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+          "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+          "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+          "sourceVersion": 1,
+          "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64"
+        }
+      },
+      {
+        "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+        "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+        "memoryVersion": 1,
+        "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+        "sourceVersion": 1,
+        "memoryKind": "experience",
+        "perspectiveType": "self",
+        "epistemicStatus": "confirmed",
+        "sensitivity": "standard",
+        "visibility": "owner",
+        "contentSchemaVersion": "owner-truth-v5",
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+          "affect": null,
+          "facets": {
+            "time": [],
+            "goals": [],
+            "habits": [],
+            "people": [],
+            "places": [
+              {
+                "value": "书房的窗台",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated",
+                "sourceTurnIndices": [
+                  1
+                ]
+              }
+            ],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": {
+            "label": "琥珀色",
+            "category": null,
+            "entityId": null
+          },
+          "summary": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+          "factType": "event",
+          "semantic": {
+            "title": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的",
+            "facets": [
+              "lifeEvent"
+            ],
+            "entities": [
+              {
+                "name": "书房的窗台",
+                "confidence": 1.0,
+                "entityType": "place",
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "occurred",
+          "statement": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+          "dimensions": [
+            "lifeEvents"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": {
+              "label": "书房的窗台",
+              "category": null,
+              "entityId": null
+            },
+            "polarity": "unknown",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "claimSubjectId": null,
+          "memorySubjectId": null,
+          "sourceTurnIndices": [
+            1,
+            3
+          ]
+        },
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 26,
+              "start": 0
+            },
+            "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+            "sourceVersion": 1
+          }
+        ],
+        "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+        "citation": {
+          "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+          "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+          "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+          "sourceVersion": 1,
+          "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9"
+        }
+      },
+      {
+        "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+        "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+        "memoryVersion": 1,
+        "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+        "sourceVersion": 1,
+        "memoryKind": "experience",
+        "perspectiveType": "self",
+        "epistemicStatus": "confirmed",
+        "sensitivity": "standard",
+        "visibility": "owner",
+        "contentSchemaVersion": "owner-truth-v5",
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "我每周五傍晚用软布擦拭它",
+          "affect": null,
+          "facets": {
+            "time": [
+              {
+                "value": "每周五傍晚",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "goals": [],
+            "habits": [
+              {
+                "value": "每周五傍晚用软布擦拭它",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "people": [],
+            "places": [],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": {
+            "label": "它",
+            "category": null,
+            "entityId": null
+          },
+          "actions": [
+            "用软布擦拭它"
+          ],
+          "outcome": null,
+          "factType": "habit",
+          "location": null,
+          "semantic": {
+            "title": "我每周五傍晚用软布擦拭它",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "entities": [],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "我每周五傍晚用软布擦拭它",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "用软布擦拭",
+          "statement": "我每周五傍晚用软布擦拭它",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": null,
+            "polarity": "neutral",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": "每周五傍晚"
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "current"
+          },
+          "participants": [],
+          "claimSubjectId": null,
+          "memorySubjectId": null
+        },
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 31,
+              "start": 0
+            },
+            "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+            "sourceVersion": 1
+          }
+        ],
+        "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa",
+        "citation": {
+          "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+          "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+          "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+          "sourceVersion": 1,
+          "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa"
+        }
+      },
+      {
+        "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+        "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+        "memoryVersion": 1,
+        "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+        "sourceVersion": 1,
+        "memoryKind": "experience",
+        "perspectiveType": "self",
+        "epistemicStatus": "confirmed",
+        "sensitivity": "standard",
+        "visibility": "owner",
+        "contentSchemaVersion": "owner-truth-v5",
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "我浇水时尽量不把水洒到窗台上。",
+          "affect": null,
+          "facets": {
+            "time": [],
+            "goals": [],
+            "habits": [
+              {
+                "value": "浇水时尽量不把水洒到窗台上",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated",
+                "sourceTurnIndices": [
+                  19
+                ]
+              }
+            ],
+            "people": [],
+            "places": [],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": null,
+          "summary": "我浇水时尽量不把水洒到窗台上。",
+          "factType": "habit",
+          "semantic": {
+            "title": "我浇水时尽量不把水洒到窗台上",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "entities": [],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "我浇水时尽量不把水洒到窗台上。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "occurred",
+          "statement": "我浇水时尽量不把水洒到窗台上。",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": null,
+            "polarity": "unknown",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "strengthExpression": "尽量",
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "claimSubjectId": null,
+          "memorySubjectId": null,
+          "sourceTurnIndices": [
+            19
+          ]
+        },
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 148,
+              "start": 133
+            },
+            "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+            "sourceVersion": 1
+          }
+        ],
+        "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b",
+        "citation": {
+          "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+          "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+          "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+          "sourceVersion": 1,
+          "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b"
+        }
+      },
+      {
+        "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+        "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+        "memoryVersion": 1,
+        "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+        "sourceVersion": 1,
+        "memoryKind": "experience",
+        "perspectiveType": "self",
+        "epistemicStatus": "confirmed",
+        "sensitivity": "standard",
+        "visibility": "owner",
+        "contentSchemaVersion": "owner-truth-v5",
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "我给鱼缸换完水，会擦干矮柜上的水滴。",
+          "affect": null,
+          "facets": {
+            "time": [],
+            "goals": [],
+            "habits": [
+              {
+                "value": "给鱼缸换完水，会擦干矮柜上的水滴",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated",
+                "sourceTurnIndices": [
+                  53
+                ]
+              }
+            ],
+            "people": [],
+            "places": [],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": null,
+          "summary": "我给鱼缸换完水，会擦干矮柜上的水滴。",
+          "factType": "habit",
+          "semantic": {
+            "title": "我给鱼缸换完水，会擦干矮柜上的水滴",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "entities": [],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "我给鱼缸换完水，会擦干矮柜上的水滴。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "occurred",
+          "statement": "我给鱼缸换完水，会擦干矮柜上的水滴。",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": null,
+            "polarity": "unknown",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "claimSubjectId": null,
+          "memorySubjectId": null,
+          "sourceTurnIndices": [
+            53
+          ]
+        },
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 588,
+              "start": 564
+            },
+            "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+            "sourceVersion": 1
+          }
+        ],
+        "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f",
+        "citation": {
+          "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+          "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+          "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+          "sourceVersion": 1,
+          "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f"
+        }
+      },
+      {
+        "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+        "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+        "memoryVersion": 1,
+        "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+        "sourceVersion": 1,
+        "memoryKind": "experience",
+        "perspectiveType": "self",
+        "epistemicStatus": "confirmed",
+        "sensitivity": "standard",
+        "visibility": "owner",
+        "contentSchemaVersion": "owner-truth-v5",
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。",
+          "affect": null,
+          "facets": {
+            "time": [],
+            "goals": [],
+            "habits": [],
+            "people": [],
+            "places": [
+              {
+                "value": "门口",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated",
+                "sourceTurnIndices": [
+                  1
+                ]
+              }
+            ],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": null,
+          "summary": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。",
+          "factType": "event",
+          "semantic": {
+            "title": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥",
+            "facets": [
+              "lifeEvent"
+            ],
+            "entities": [
+              {
+                "name": "门口",
+                "confidence": 1.0,
+                "entityType": "place",
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "occurred",
+          "statement": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。",
+          "dimensions": [
+            "lifeEvents",
+            "knowledgeSkills"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": {
+              "label": "门口",
+              "category": null,
+              "entityId": null
+            },
+            "polarity": "unknown",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "historical"
+          },
+          "claimSubjectId": null,
+          "memorySubjectId": null,
+          "sourceTurnIndices": [
+            1,
+            3
+          ]
+        },
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 30,
+              "start": 0
+            },
+            "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+            "sourceVersion": 1
+          }
+        ],
+        "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+        "citation": {
+          "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+          "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+          "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+          "sourceVersion": 1,
+          "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0"
+        }
+      },
+      {
+        "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+        "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+        "memoryVersion": 1,
+        "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+        "sourceVersion": 1,
+        "memoryKind": "experience",
+        "perspectiveType": "self",
+        "epistemicStatus": "confirmed",
+        "sensitivity": "standard",
+        "visibility": "owner",
+        "contentSchemaVersion": "owner-truth-v5",
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+          "affect": null,
+          "facets": {
+            "time": [
+              {
+                "value": "每周日晚上",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "goals": [],
+            "habits": [
+              {
+                "value": "我每周日晚上转动它的手柄，听一小段音乐",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "people": [],
+            "places": [
+              {
+                "value": "玄关木柜上",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": {
+            "label": "深蓝色手摇音乐盒",
+            "category": null,
+            "entityId": null
+          },
+          "actions": [
+            "转动它的手柄",
+            "听一小段音乐"
+          ],
+          "outcome": null,
+          "factType": "habit",
+          "location": "玄关木柜上",
+          "semantic": {
+            "title": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "entities": [
+              {
+                "name": "玄关木柜上",
+                "confidence": 1.0,
+                "entityType": "place",
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "转动手柄并听音乐",
+          "statement": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": {
+              "label": "玄关木柜上",
+              "category": null,
+              "entityId": null
+            },
+            "polarity": "neutral",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": "每周日晚上"
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "current"
+          },
+          "participants": [],
+          "claimSubjectId": null,
+          "memorySubjectId": null
+        },
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 39,
+              "start": 0
+            },
+            "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+            "sourceVersion": 1
+          }
+        ],
+        "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+        "citation": {
+          "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+          "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+          "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+          "sourceVersion": 1,
+          "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803"
+        }
+      },
+      {
+        "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+        "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+        "memoryVersion": 1,
+        "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+        "sourceVersion": 1,
+        "memoryKind": "experience",
+        "perspectiveType": "self",
+        "epistemicStatus": "confirmed",
+        "sensitivity": "standard",
+        "visibility": "owner",
+        "contentSchemaVersion": "owner-truth-v5",
+        "content": {
+          "time": {
+            "end": null,
+            "start": null,
+            "precision": "unknown"
+          },
+          "event": "这盆小葱放在厨房窗台上。",
+          "affect": null,
+          "facets": {
+            "time": [],
+            "goals": [],
+            "habits": [],
+            "people": [],
+            "places": [
+              {
+                "value": "厨房窗台",
+                "confidence": 1.0,
+                "evidenceMode": "ownerStated",
+                "sourceTurnIndices": [
+                  3
+                ]
+              }
+            ],
+            "values": [],
+            "emotions": [],
+            "identity": [],
+            "confidence": 0.9,
+            "personality": [],
+            "reflections": [],
+            "relationships": []
+          },
+          "object": null,
+          "summary": "这盆小葱放在厨房窗台上。",
+          "factType": "attribute",
+          "semantic": {
+            "title": "这盆小葱放在厨房窗台上",
+            "facets": [
+              "lifeEvent"
+            ],
+            "entities": [
+              {
+                "name": "厨房窗台",
+                "confidence": 1.0,
+                "entityType": "place",
+                "evidenceMode": "ownerStated"
+              }
+            ],
+            "eventTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown"
+            },
+            "narrative": "这盆小葱放在厨房窗台上。",
+            "primaryKind": "lifeEvent",
+            "emotionEvidence": []
+          },
+          "predicate": "locatedAt",
+          "statement": "这盆小葱放在厨房窗台上。",
+          "dimensions": [
+            "identity",
+            "lifeEvents"
+          ],
+          "provenance": {
+            "mode": "selfReport",
+            "evidenceRefs": [
+              {
+                "turnId": null,
+                "relation": "supports",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ],
+            "speakerPersonId": null,
+            "contributorAccountId": null
+          },
+          "qualifiers": {
+            "place": {
+              "label": "厨房窗台",
+              "category": null,
+              "entityId": null
+            },
+            "polarity": "unknown",
+            "scenario": null,
+            "validTime": {
+              "end": null,
+              "start": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "unknown"
+          },
+          "claimSubjectId": null,
+          "memorySubjectId": null,
+          "sourceTurnIndices": [
+            3
+          ]
+        },
+        "evidenceRefs": [
+          {
+            "span": {
+              "end": 26,
+              "start": 14
+            },
+            "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+            "sourceVersion": 1
+          }
+        ],
+        "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+        "citation": {
+          "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+          "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+          "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+          "sourceVersion": 1,
+          "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f"
+        }
+      }
+    ],
+    "personMemoryModel": {
+      "schemaVersion": "owner-truth-person-memory-model-v1",
+      "algorithmVersion": "evidence-bound-person-model-v2",
+      "state": "ready",
+      "modelVersion": "5022b50849937b13f9d3bd9cba6271a668660f7227457a0f82a21c1bf30ce65b",
+      "memoryCount": 8,
+      "consolidatedMemoryCount": 8,
+      "unresolvedConflictCount": 0,
+      "sourceFingerprint": "42e7a087fc8e55adb8ea17bcfac576931beb6e35dac03160b56217abe873c4de",
+      "formalMemories": [
+        {
+          "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+          "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+          "memoryVersion": 1,
+          "memoryKind": "experience",
+          "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+          "contentSchemaVersion": "owner-truth-v5",
+          "primaryKind": "lifeEvent",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "title": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐",
+          "narrative": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+          "eventTime": {
+            "start": null,
+            "end": null,
+            "precision": "unknown",
+            "expression": "每周日晚上"
+          },
+          "entities": [
+            {
+              "entityType": "place",
+              "name": "玄关木柜上",
+              "evidenceMode": "ownerStated",
+              "confidence": 1.0
+            }
+          ],
+          "emotionEvidence": [],
+          "facetEvidence": {
+            "people": [],
+            "time": [
+              {
+                "value": "每周日晚上",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "places": [
+              {
+                "value": "玄关木柜上",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [
+              {
+                "value": "我每周日晚上转动它的手柄，听一小段音乐",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "goals": [],
+            "identity": [],
+            "reflections": []
+          },
+          "perspectiveType": "self",
+          "epistemicStatus": "confirmed",
+          "sensitivity": "standard",
+          "factType": "habit",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "predicate": "转动手柄并听音乐",
+          "object": {
+            "entityId": null,
+            "label": "深蓝色手摇音乐盒",
+            "category": null
+          },
+          "qualifiers": {
+            "polarity": "neutral",
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "current",
+            "validTime": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": "每周日晚上"
+            },
+            "place": {
+              "entityId": null,
+              "label": "玄关木柜上",
+              "category": null
+            },
+            "scenario": null
+          },
+          "affect": null,
+          "provenance": {
+            "mode": "selfReport",
+            "speakerPersonId": null,
+            "contributorAccountId": null,
+            "evidenceRefs": [
+              {
+                "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+                "sourceVersion": 1,
+                "turnId": null,
+                "relation": "supports"
+              }
+            ]
+          },
+          "semanticSlot": "转动手柄并听音乐",
+          "semanticValue": "深蓝色手摇音乐盒",
+          "evidenceRefs": [
+            {
+              "span": {
+                "end": 39,
+                "start": 0
+              },
+              "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+              "sourceVersion": 1
+            }
+          ],
+          "memorySubjectId": null,
+          "claimSubjectId": null,
+          "citation": {
+            "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+            "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+            "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+            "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+            "sourceVersion": 1
+          }
+        },
+        {
+          "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+          "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+          "memoryVersion": 1,
+          "memoryKind": "experience",
+          "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+          "contentSchemaVersion": "owner-truth-v5",
+          "primaryKind": "lifeEvent",
+          "facets": [
+            "lifeEvent"
+          ],
+          "title": "这盆小葱放在厨房窗台上",
+          "narrative": "这盆小葱放在厨房窗台上。",
+          "eventTime": {
+            "start": null,
+            "end": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "entities": [
+            {
+              "entityType": "place",
+              "name": "厨房窗台",
+              "evidenceMode": "ownerStated",
+              "confidence": 1.0
+            }
+          ],
+          "emotionEvidence": [],
+          "facetEvidence": {
+            "people": [],
+            "time": [],
+            "places": [
+              {
+                "value": "厨房窗台",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [],
+            "goals": [],
+            "identity": [],
+            "reflections": []
+          },
+          "perspectiveType": "self",
+          "epistemicStatus": "confirmed",
+          "sensitivity": "standard",
+          "factType": "attribute",
+          "dimensions": [
+            "identity",
+            "lifeEvents"
+          ],
+          "predicate": "locatedAt",
+          "object": null,
+          "qualifiers": {
+            "polarity": "unknown",
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "unknown",
+            "validTime": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "place": {
+              "entityId": null,
+              "label": "厨房窗台",
+              "category": null
+            },
+            "scenario": null
+          },
+          "affect": null,
+          "provenance": {
+            "mode": "selfReport",
+            "speakerPersonId": null,
+            "contributorAccountId": null,
+            "evidenceRefs": [
+              {
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1,
+                "turnId": null,
+                "relation": "supports"
+              }
+            ]
+          },
+          "semanticSlot": "locatedAt",
+          "semanticValue": "",
+          "evidenceRefs": [
+            {
+              "span": {
+                "end": 26,
+                "start": 14
+              },
+              "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+              "sourceVersion": 1
+            }
+          ],
+          "memorySubjectId": null,
+          "claimSubjectId": null,
+          "citation": {
+            "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+            "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+            "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+            "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+            "sourceVersion": 1
+          }
+        },
+        {
+          "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+          "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+          "memoryVersion": 1,
+          "memoryKind": "experience",
+          "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+          "contentSchemaVersion": "owner-truth-v5",
+          "primaryKind": "lifeEvent",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "title": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏",
+          "narrative": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏。",
+          "eventTime": {
+            "start": null,
+            "end": null,
+            "precision": "unknown",
+            "expression": "每周日早上"
+          },
+          "entities": [
+            {
+              "entityType": "place",
+              "name": "书房窗台",
+              "evidenceMode": "ownerStated",
+              "confidence": 1.0
+            }
+          ],
+          "emotionEvidence": [],
+          "facetEvidence": {
+            "people": [],
+            "time": [
+              {
+                "value": "每周日早上",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "places": [
+              {
+                "value": "书房窗台",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [
+              {
+                "value": "每周日早上擦拭书房窗台上的琥珀色沙漏",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "goals": [],
+            "identity": [],
+            "reflections": []
+          },
+          "perspectiveType": "self",
+          "epistemicStatus": "confirmed",
+          "sensitivity": "standard",
+          "factType": "habit",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "predicate": "occurred",
+          "object": null,
+          "qualifiers": {
+            "polarity": "positive",
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "unknown",
+            "validTime": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": "每周日早上"
+            },
+            "place": {
+              "entityId": null,
+              "label": "书房窗台",
+              "category": null
+            },
+            "scenario": null
+          },
+          "affect": null,
+          "provenance": {
+            "mode": "selfReport",
+            "speakerPersonId": null,
+            "contributorAccountId": null,
+            "evidenceRefs": [
+              {
+                "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+                "sourceVersion": 1,
+                "turnId": null,
+                "relation": "supports"
+              }
+            ]
+          },
+          "semanticSlot": "occurred",
+          "semanticValue": "",
+          "evidenceRefs": [
+            {
+              "span": {
+                "end": 22,
+                "start": 0
+              },
+              "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+              "sourceVersion": 1
+            }
+          ],
+          "memorySubjectId": null,
+          "claimSubjectId": null,
+          "citation": {
+            "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+            "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+            "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+            "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+            "sourceVersion": 1
+          }
+        },
+        {
+          "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+          "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+          "memoryVersion": 1,
+          "memoryKind": "experience",
+          "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+          "contentSchemaVersion": "owner-truth-v5",
+          "primaryKind": "lifeEvent",
+          "facets": [
+            "lifeEvent"
+          ],
+          "title": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的",
+          "narrative": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+          "eventTime": {
+            "start": null,
+            "end": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "entities": [
+            {
+              "entityType": "place",
+              "name": "书房的窗台",
+              "evidenceMode": "ownerStated",
+              "confidence": 1.0
+            }
+          ],
+          "emotionEvidence": [],
+          "facetEvidence": {
+            "people": [],
+            "time": [],
+            "places": [
+              {
+                "value": "书房的窗台",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [],
+            "goals": [],
+            "identity": [],
+            "reflections": []
+          },
+          "perspectiveType": "self",
+          "epistemicStatus": "confirmed",
+          "sensitivity": "standard",
+          "factType": "event",
+          "dimensions": [
+            "lifeEvents"
+          ],
+          "predicate": "occurred",
+          "object": {
+            "entityId": null,
+            "label": "琥珀色",
+            "category": null
+          },
+          "qualifiers": {
+            "polarity": "unknown",
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "historical",
+            "validTime": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "place": {
+              "entityId": null,
+              "label": "书房的窗台",
+              "category": null
+            },
+            "scenario": null
+          },
+          "affect": null,
+          "provenance": {
+            "mode": "selfReport",
+            "speakerPersonId": null,
+            "contributorAccountId": null,
+            "evidenceRefs": [
+              {
+                "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+                "sourceVersion": 1,
+                "turnId": null,
+                "relation": "supports"
+              }
+            ]
+          },
+          "semanticSlot": "occurred",
+          "semanticValue": "琥珀色",
+          "evidenceRefs": [
+            {
+              "span": {
+                "end": 26,
+                "start": 0
+              },
+              "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+              "sourceVersion": 1
+            }
+          ],
+          "memorySubjectId": null,
+          "claimSubjectId": null,
+          "citation": {
+            "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+            "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+            "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+            "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+            "sourceVersion": 1
+          }
+        },
+        {
+          "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+          "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+          "memoryVersion": 1,
+          "memoryKind": "experience",
+          "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f",
+          "contentSchemaVersion": "owner-truth-v5",
+          "primaryKind": "lifeEvent",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "title": "我给鱼缸换完水，会擦干矮柜上的水滴",
+          "narrative": "我给鱼缸换完水，会擦干矮柜上的水滴。",
+          "eventTime": {
+            "start": null,
+            "end": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "entities": [],
+          "emotionEvidence": [],
+          "facetEvidence": {
+            "people": [],
+            "time": [],
+            "places": [],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [
+              {
+                "value": "给鱼缸换完水，会擦干矮柜上的水滴",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "goals": [],
+            "identity": [],
+            "reflections": []
+          },
+          "perspectiveType": "self",
+          "epistemicStatus": "confirmed",
+          "sensitivity": "standard",
+          "factType": "habit",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "predicate": "occurred",
+          "object": null,
+          "qualifiers": {
+            "polarity": "unknown",
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "historical",
+            "validTime": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "place": null,
+            "scenario": null
+          },
+          "affect": null,
+          "provenance": {
+            "mode": "selfReport",
+            "speakerPersonId": null,
+            "contributorAccountId": null,
+            "evidenceRefs": [
+              {
+                "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+                "sourceVersion": 1,
+                "turnId": null,
+                "relation": "supports"
+              }
+            ]
+          },
+          "semanticSlot": "occurred",
+          "semanticValue": "",
+          "evidenceRefs": [
+            {
+              "span": {
+                "end": 588,
+                "start": 564
+              },
+              "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+              "sourceVersion": 1
+            }
+          ],
+          "memorySubjectId": null,
+          "claimSubjectId": null,
+          "citation": {
+            "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+            "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+            "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f",
+            "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+            "sourceVersion": 1
+          }
+        },
+        {
+          "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+          "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+          "memoryVersion": 1,
+          "memoryKind": "experience",
+          "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+          "contentSchemaVersion": "owner-truth-v5",
+          "primaryKind": "lifeEvent",
+          "facets": [
+            "lifeEvent"
+          ],
+          "title": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥",
+          "narrative": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。",
+          "eventTime": {
+            "start": null,
+            "end": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "entities": [
+            {
+              "entityType": "place",
+              "name": "门口",
+              "evidenceMode": "ownerStated",
+              "confidence": 1.0
+            }
+          ],
+          "emotionEvidence": [],
+          "facetEvidence": {
+            "people": [],
+            "time": [],
+            "places": [
+              {
+                "value": "门口",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [],
+            "goals": [],
+            "identity": [],
+            "reflections": []
+          },
+          "perspectiveType": "self",
+          "epistemicStatus": "confirmed",
+          "sensitivity": "standard",
+          "factType": "event",
+          "dimensions": [
+            "lifeEvents",
+            "knowledgeSkills"
+          ],
+          "predicate": "occurred",
+          "object": null,
+          "qualifiers": {
+            "polarity": "unknown",
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "historical",
+            "validTime": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "place": {
+              "entityId": null,
+              "label": "门口",
+              "category": null
+            },
+            "scenario": null
+          },
+          "affect": null,
+          "provenance": {
+            "mode": "selfReport",
+            "speakerPersonId": null,
+            "contributorAccountId": null,
+            "evidenceRefs": [
+              {
+                "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+                "sourceVersion": 1,
+                "turnId": null,
+                "relation": "supports"
+              }
+            ]
+          },
+          "semanticSlot": "occurred",
+          "semanticValue": "",
+          "evidenceRefs": [
+            {
+              "span": {
+                "end": 30,
+                "start": 0
+              },
+              "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+              "sourceVersion": 1
+            }
+          ],
+          "memorySubjectId": null,
+          "claimSubjectId": null,
+          "citation": {
+            "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+            "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+            "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+            "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+            "sourceVersion": 1
+          }
+        },
+        {
+          "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+          "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+          "memoryVersion": 1,
+          "memoryKind": "experience",
+          "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa",
+          "contentSchemaVersion": "owner-truth-v5",
+          "primaryKind": "lifeEvent",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "title": "我每周五傍晚用软布擦拭它",
+          "narrative": "我每周五傍晚用软布擦拭它",
+          "eventTime": {
+            "start": null,
+            "end": null,
+            "precision": "unknown",
+            "expression": "每周五傍晚"
+          },
+          "entities": [],
+          "emotionEvidence": [],
+          "facetEvidence": {
+            "people": [],
+            "time": [
+              {
+                "value": "每周五傍晚",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "places": [],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [
+              {
+                "value": "每周五傍晚用软布擦拭它",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "goals": [],
+            "identity": [],
+            "reflections": []
+          },
+          "perspectiveType": "self",
+          "epistemicStatus": "confirmed",
+          "sensitivity": "standard",
+          "factType": "habit",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "predicate": "用软布擦拭",
+          "object": {
+            "entityId": null,
+            "label": "它",
+            "category": null
+          },
+          "qualifiers": {
+            "polarity": "neutral",
+            "strengthExpression": null,
+            "superlativeAsserted": false,
+            "currentApplicability": "current",
+            "validTime": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": "每周五傍晚"
+            },
+            "place": null,
+            "scenario": null
+          },
+          "affect": null,
+          "provenance": {
+            "mode": "selfReport",
+            "speakerPersonId": null,
+            "contributorAccountId": null,
+            "evidenceRefs": [
+              {
+                "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+                "sourceVersion": 1,
+                "turnId": null,
+                "relation": "supports"
+              }
+            ]
+          },
+          "semanticSlot": "用软布擦拭",
+          "semanticValue": "它",
+          "evidenceRefs": [
+            {
+              "span": {
+                "end": 31,
+                "start": 0
+              },
+              "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+              "sourceVersion": 1
+            }
+          ],
+          "memorySubjectId": null,
+          "claimSubjectId": null,
+          "citation": {
+            "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+            "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+            "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa",
+            "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+            "sourceVersion": 1
+          }
+        },
+        {
+          "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+          "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+          "memoryVersion": 1,
+          "memoryKind": "experience",
+          "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b",
+          "contentSchemaVersion": "owner-truth-v5",
+          "primaryKind": "lifeEvent",
+          "facets": [
+            "lifeEvent",
+            "habit"
+          ],
+          "title": "我浇水时尽量不把水洒到窗台上",
+          "narrative": "我浇水时尽量不把水洒到窗台上。",
+          "eventTime": {
+            "start": null,
+            "end": null,
+            "precision": "unknown",
+            "expression": null
+          },
+          "entities": [],
+          "emotionEvidence": [],
+          "facetEvidence": {
+            "people": [],
+            "time": [],
+            "places": [],
+            "relationships": [],
+            "emotions": [],
+            "values": [],
+            "personality": [],
+            "habits": [
+              {
+                "value": "浇水时尽量不把水洒到窗台上",
+                "evidenceMode": "ownerStated",
+                "confidence": 1.0
+              }
+            ],
+            "goals": [],
+            "identity": [],
+            "reflections": []
+          },
+          "perspectiveType": "self",
+          "epistemicStatus": "confirmed",
+          "sensitivity": "standard",
+          "factType": "habit",
+          "dimensions": [
+            "lifeEvents",
+            "habits"
+          ],
+          "predicate": "occurred",
+          "object": null,
+          "qualifiers": {
+            "polarity": "unknown",
+            "strengthExpression": "尽量",
+            "superlativeAsserted": false,
+            "currentApplicability": "historical",
+            "validTime": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "place": null,
+            "scenario": null
+          },
+          "affect": null,
+          "provenance": {
+            "mode": "selfReport",
+            "speakerPersonId": null,
+            "contributorAccountId": null,
+            "evidenceRefs": [
+              {
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1,
+                "turnId": null,
+                "relation": "supports"
+              }
+            ]
+          },
+          "semanticSlot": "occurred",
+          "semanticValue": "",
+          "evidenceRefs": [
+            {
+              "span": {
+                "end": 148,
+                "start": 133
+              },
+              "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+              "sourceVersion": 1
+            }
+          ],
+          "memorySubjectId": null,
+          "claimSubjectId": null,
+          "citation": {
+            "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+            "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+            "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b",
+            "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+            "sourceVersion": 1
+          }
+        }
+      ],
+      "semanticConsolidation": {
+        "schemaVersion": "owner-truth-semantic-consolidation-v1",
+        "sourceMemoryCount": 8,
+        "groupCount": 8,
+        "mergedGroupCount": 0,
+        "conflictGroupCount": 0,
+        "groups": [
+          {
+            "groupId": "memory-group-802205588d970b6f2f0981de",
+            "status": "ready",
+            "primaryKind": "lifeEvent",
+            "memoryKind": "experience",
+            "title": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥",
+            "narrative": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。",
+            "facets": [
+              "lifeEvent"
+            ],
+            "supportingMemoryCount": 1,
+            "supportingMemoryIds": [
+              "9458ec2f-0782-5c74-aec5-ad7b933715ad"
+            ],
+            "supportingMemoryVersionIds": [
+              "a8b792e4-04fc-5f16-9add-12dce1feb644"
+            ],
+            "representativeMemoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+            "evidence": [
+              {
+                "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+                "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+                "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+                "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+                "sourceVersion": 1
+              }
+            ],
+            "alternatives": [],
+            "searchText": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。 门口"
+          },
+          {
+            "groupId": "memory-group-82156a40c13e0758af38d6f1",
+            "status": "ready",
+            "primaryKind": "lifeEvent",
+            "memoryKind": "experience",
+            "title": "这盆小葱放在厨房窗台上",
+            "narrative": "这盆小葱放在厨房窗台上。",
+            "facets": [
+              "lifeEvent"
+            ],
+            "supportingMemoryCount": 1,
+            "supportingMemoryIds": [
+              "2c982887-e70f-5b1c-9a12-65876c484c0a"
+            ],
+            "supportingMemoryVersionIds": [
+              "6ba36212-8a33-5378-8c1b-ba9588f48b9f"
+            ],
+            "representativeMemoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+            "evidence": [
+              {
+                "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+                "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+                "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ],
+            "alternatives": [],
+            "searchText": "这盆小葱放在厨房窗台上。 厨房窗台"
+          },
+          {
+            "groupId": "memory-group-98b4d93ef813ee4a2d47a333",
+            "status": "ready",
+            "primaryKind": "lifeEvent",
+            "memoryKind": "experience",
+            "title": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐",
+            "narrative": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "supportingMemoryCount": 1,
+            "supportingMemoryIds": [
+              "932719bc-0ff1-505f-bbb6-9a82348fdd88"
+            ],
+            "supportingMemoryVersionIds": [
+              "1f46b715-fedd-5fb8-ac0d-5d8c9c425365"
+            ],
+            "representativeMemoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+            "evidence": [
+              {
+                "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+                "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+                "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+                "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+                "sourceVersion": 1
+              }
+            ],
+            "alternatives": [],
+            "searchText": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。 每周日晚上 玄关木柜上 我每周日晚上转动它的手柄，听一小段音乐"
+          },
+          {
+            "groupId": "memory-group-9b33e2128bdad8d9b6e1a135",
+            "status": "ready",
+            "primaryKind": "lifeEvent",
+            "memoryKind": "experience",
+            "title": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏",
+            "narrative": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏。",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "supportingMemoryCount": 1,
+            "supportingMemoryIds": [
+              "2ca7c206-918b-5bc6-b512-45ec548bb7ae"
+            ],
+            "supportingMemoryVersionIds": [
+              "8d46da67-2606-527b-a287-28b5b3aef096"
+            ],
+            "representativeMemoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+            "evidence": [
+              {
+                "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+                "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+                "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+                "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+                "sourceVersion": 1
+              }
+            ],
+            "alternatives": [],
+            "searchText": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏。 每周日早上 书房窗台 每周日早上擦拭书房窗台上的琥珀色沙漏"
+          },
+          {
+            "groupId": "memory-group-bdf4552b64300eb846dc8c96",
+            "status": "ready",
+            "primaryKind": "lifeEvent",
+            "memoryKind": "experience",
+            "title": "我浇水时尽量不把水洒到窗台上",
+            "narrative": "我浇水时尽量不把水洒到窗台上。",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "supportingMemoryCount": 1,
+            "supportingMemoryIds": [
+              "dacb688b-cdaa-5388-b37e-a7e1ab50af7d"
+            ],
+            "supportingMemoryVersionIds": [
+              "d0a3b187-288b-5090-b9da-b1ebd4e3d071"
+            ],
+            "representativeMemoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+            "evidence": [
+              {
+                "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+                "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+                "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ],
+            "alternatives": [],
+            "searchText": "我浇水时尽量不把水洒到窗台上。 浇水时尽量不把水洒到窗台上"
+          },
+          {
+            "groupId": "memory-group-bee810c8a81d3781b61067ae",
+            "status": "ready",
+            "primaryKind": "lifeEvent",
+            "memoryKind": "experience",
+            "title": "我每周五傍晚用软布擦拭它",
+            "narrative": "我每周五傍晚用软布擦拭它",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "supportingMemoryCount": 1,
+            "supportingMemoryIds": [
+              "cac6df5c-68c0-5146-8f06-a52252eba55f"
+            ],
+            "supportingMemoryVersionIds": [
+              "ab53b4e7-c616-536d-974f-b3d7c1dd641f"
+            ],
+            "representativeMemoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+            "evidence": [
+              {
+                "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+                "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+                "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa",
+                "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+                "sourceVersion": 1
+              }
+            ],
+            "alternatives": [],
+            "searchText": "我每周五傍晚用软布擦拭它 每周五傍晚 每周五傍晚用软布擦拭它"
+          },
+          {
+            "groupId": "memory-group-c3646d1d7035fcbf6db2d60e",
+            "status": "ready",
+            "primaryKind": "lifeEvent",
+            "memoryKind": "experience",
+            "title": "我给鱼缸换完水，会擦干矮柜上的水滴",
+            "narrative": "我给鱼缸换完水，会擦干矮柜上的水滴。",
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "supportingMemoryCount": 1,
+            "supportingMemoryIds": [
+              "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb"
+            ],
+            "supportingMemoryVersionIds": [
+              "97e509c3-86b1-582d-b650-a60ca63d57fe"
+            ],
+            "representativeMemoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+            "evidence": [
+              {
+                "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+                "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+                "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f",
+                "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+                "sourceVersion": 1
+              }
+            ],
+            "alternatives": [],
+            "searchText": "我给鱼缸换完水，会擦干矮柜上的水滴。 给鱼缸换完水，会擦干矮柜上的水滴"
+          },
+          {
+            "groupId": "memory-group-df1f0dfa1e0cbc93d07ba950",
+            "status": "ready",
+            "primaryKind": "lifeEvent",
+            "memoryKind": "experience",
+            "title": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的",
+            "narrative": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+            "facets": [
+              "lifeEvent"
+            ],
+            "supportingMemoryCount": 1,
+            "supportingMemoryIds": [
+              "66009ec7-de6c-5cf8-8f4e-68ca409322ea"
+            ],
+            "supportingMemoryVersionIds": [
+              "957aafeb-72fe-5b00-89a7-878bcf899834"
+            ],
+            "representativeMemoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+            "evidence": [
+              {
+                "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+                "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+                "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+                "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+                "sourceVersion": 1
+              }
+            ],
+            "alternatives": [],
+            "searchText": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。 书房的窗台"
+          }
+        ]
+      },
+      "cognitiveProjection": {
+        "schemaVersion": "owner-truth-cognitive-projection-v1",
+        "facts": [],
+        "experiences": [
+          {
+            "itemId": "item-f8a838187bedc6883f159277",
+            "itemKind": "experience",
+            "statement": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。",
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "facets": [
+              "lifeEvent"
+            ],
+            "evidence": [
+              {
+                "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+                "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+                "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+                "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "itemId": "item-a284916dbc497bd871c0c8bf",
+            "itemKind": "experience",
+            "statement": "这盆小葱放在厨房窗台上。",
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "facets": [
+              "lifeEvent"
+            ],
+            "evidence": [
+              {
+                "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+                "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+                "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "itemId": "item-27d0c425093c1fbe77e30c1a",
+            "itemKind": "experience",
+            "statement": "补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。",
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "evidence": [
+              {
+                "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+                "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+                "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+                "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "itemId": "item-d234520c5cfa7d63b44789b6",
+            "itemKind": "experience",
+            "statement": "我每周日早上擦拭书房窗台上的那个琥珀色沙漏。",
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "evidence": [
+              {
+                "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+                "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+                "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+                "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "itemId": "item-35b1af4e91d8e97fb53eecc5",
+            "itemKind": "experience",
+            "statement": "我浇水时尽量不把水洒到窗台上。",
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "evidence": [
+              {
+                "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+                "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+                "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "itemId": "item-74b003bb1ce5bb62de6b3925",
+            "itemKind": "experience",
+            "statement": "我每周五傍晚用软布擦拭它",
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "evidence": [
+              {
+                "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+                "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+                "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa",
+                "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "itemId": "item-770f4440e71b11c3fd305f06",
+            "itemKind": "experience",
+            "statement": "我给鱼缸换完水，会擦干矮柜上的水滴。",
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "facets": [
+              "lifeEvent",
+              "habit"
+            ],
+            "evidence": [
+              {
+                "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+                "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+                "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f",
+                "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "itemId": "item-be476c3e056e14a38321fa92",
+            "itemKind": "experience",
+            "statement": "我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "facets": [
+              "lifeEvent"
+            ],
+            "evidence": [
+              {
+                "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+                "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+                "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+                "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+                "sourceVersion": 1
+              }
+            ]
+          }
+        ],
+        "observations": [],
+        "mentalModels": []
+      },
+      "relationshipProjection": {
+        "schemaVersion": "owner-truth-relationship-projection-v1",
+        "entities": [
+          {
+            "entityId": "entity-03f6cee1065ec5f782f941fe",
+            "entityType": "place",
+            "name": "书房的窗台",
+            "evidence": [
+              {
+                "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+                "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+                "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+                "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "entityId": "entity-36b7342f11886e1264511f67",
+            "entityType": "place",
+            "name": "玄关木柜上",
+            "evidence": [
+              {
+                "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+                "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+                "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+                "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "entityId": "entity-547dff2f00e35dea0aa49132",
+            "entityType": "place",
+            "name": "厨房窗台",
+            "evidence": [
+              {
+                "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+                "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+                "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "entityId": "entity-790060375fd83cd49fc36e58",
+            "entityType": "place",
+            "name": "书房窗台",
+            "evidence": [
+              {
+                "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+                "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+                "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+                "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "entityId": "entity-de8b437aac22528736c7612f",
+            "entityType": "place",
+            "name": "门口",
+            "evidence": [
+              {
+                "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+                "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+                "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+                "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "entityId": "entity-owner",
+            "entityType": "self",
+            "name": "自己",
+            "evidence": []
+          }
+        ],
+        "relations": [
+          {
+            "relationId": "relation-246eef09d650a3e8f15f71ea",
+            "fromEntityId": "entity-owner",
+            "toEntityId": "entity-547dff2f00e35dea0aa49132",
+            "relationType": "发生于",
+            "validAt": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "invalidAt": null,
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "evidence": [
+              {
+                "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+                "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+                "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "relationId": "relation-35ecd8881a27c7790f5a14b7",
+            "fromEntityId": "entity-owner",
+            "toEntityId": "entity-de8b437aac22528736c7612f",
+            "relationType": "发生于",
+            "validAt": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "invalidAt": null,
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "evidence": [
+              {
+                "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+                "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+                "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+                "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "relationId": "relation-50ac8920aabde2a43d40d715",
+            "fromEntityId": "entity-owner",
+            "toEntityId": "entity-03f6cee1065ec5f782f941fe",
+            "relationType": "发生于",
+            "validAt": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": null
+            },
+            "invalidAt": null,
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "evidence": [
+              {
+                "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+                "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+                "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+                "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "relationId": "relation-892a6d63d64bf08eb2cb7723",
+            "fromEntityId": "entity-owner",
+            "toEntityId": "entity-36b7342f11886e1264511f67",
+            "relationType": "发生于",
+            "validAt": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": "每周日晚上"
+            },
+            "invalidAt": null,
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "evidence": [
+              {
+                "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+                "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+                "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+                "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "relationId": "relation-cf69947d03d1ec92c0f90642",
+            "fromEntityId": "entity-owner",
+            "toEntityId": "entity-790060375fd83cd49fc36e58",
+            "relationType": "发生于",
+            "validAt": {
+              "start": null,
+              "end": null,
+              "precision": "unknown",
+              "expression": "每周日早上"
+            },
+            "invalidAt": null,
+            "epistemicStatus": "confirmed",
+            "confidence": 1.0,
+            "evidence": [
+              {
+                "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+                "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+                "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+                "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+                "sourceVersion": 1
+              }
+            ]
+          }
+        ]
+      },
+      "biographyProjection": {
+        "schemaVersion": "owner-truth-biography-projection-v1",
+        "format": "structuredText",
+        "state": "ready",
+        "documentVersion": "eaf105760efc7c26130af24ec3c96b9b55670ac961587c2a142ddaf1bbd5acdc",
+        "sourceFingerprint": "42e7a087fc8e55adb8ea17bcfac576931beb6e35dac03160b56217abe873c4de",
+        "title": "我的人生记录",
+        "overview": "这是一份由我亲自确认的记忆持续整理而成的人生记录。",
+        "sections": [
+          {
+            "sectionId": "inner-world",
+            "title": "内心、性格与坚持",
+            "blocks": [
+              {
+                "blockId": "block-3cfa631f2e640d8710966b18",
+                "blockType": "narrative",
+                "text": "在我的人生记录里，补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。我每周日早上擦拭书房窗台上的那个琥珀色沙漏。我浇水时尽量不把水洒到窗台上。",
+                "facets": [
+                  "lifeEvent",
+                  "habit"
+                ],
+                "evidence": [
+                  {
+                    "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+                    "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+                    "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+                    "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+                    "sourceVersion": 1
+                  },
+                  {
+                    "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+                    "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+                    "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+                    "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+                    "sourceVersion": 1
+                  },
+                  {
+                    "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+                    "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+                    "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b",
+                    "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                    "sourceVersion": 1
+                  }
+                ]
+              },
+              {
+                "blockId": "block-ddb48b8d78bdcefdd80e4edd",
+                "blockType": "narrative",
+                "text": "后来，我每周五傍晚用软布擦拭它。我给鱼缸换完水，会擦干矮柜上的水滴。",
+                "facets": [
+                  "lifeEvent",
+                  "habit"
+                ],
+                "evidence": [
+                  {
+                    "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+                    "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+                    "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f",
+                    "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+                    "sourceVersion": 1
+                  },
+                  {
+                    "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+                    "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+                    "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa",
+                    "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+                    "sourceVersion": 1
+                  }
+                ]
+              }
+            ],
+            "evidence": [
+              {
+                "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+                "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+                "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803",
+                "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+                "sourceVersion": 1
+              },
+              {
+                "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+                "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+                "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64",
+                "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+                "sourceVersion": 1
+              },
+              {
+                "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+                "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+                "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f",
+                "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+                "sourceVersion": 1
+              },
+              {
+                "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+                "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+                "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa",
+                "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+                "sourceVersion": 1
+              },
+              {
+                "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+                "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+                "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              }
+            ]
+          },
+          {
+            "sectionId": "life-fragments",
+            "title": "人生片段",
+            "blocks": [
+              {
+                "blockId": "block-372446eac35765449f9a99f6",
+                "blockType": "narrative",
+                "text": "在我的人生记录里，我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。这盆小葱放在厨房窗台上。我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+                "facets": [
+                  "lifeEvent"
+                ],
+                "evidence": [
+                  {
+                    "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+                    "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+                    "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+                    "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                    "sourceVersion": 1
+                  },
+                  {
+                    "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+                    "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+                    "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+                    "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+                    "sourceVersion": 1
+                  },
+                  {
+                    "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+                    "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+                    "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+                    "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+                    "sourceVersion": 1
+                  }
+                ]
+              }
+            ],
+            "evidence": [
+              {
+                "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+                "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+                "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f",
+                "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+                "sourceVersion": 1
+              },
+              {
+                "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+                "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+                "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9",
+                "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+                "sourceVersion": 1
+              },
+              {
+                "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+                "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+                "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0",
+                "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+                "sourceVersion": 1
+              }
+            ]
+          }
+        ],
+        "sectionCount": 2,
+        "supportingMemoryCount": 8
+      },
+      "dimensions": [
+        {
+          "dimension": "lifeEvent",
+          "title": "经历与人生轨迹",
+          "status": "ready",
+          "narrative": "我在门口放了一个紫色的鞋刷，这把鞋刷专门用来刷雨靴上的泥。这盆小葱放在厨房窗台上。补充玄关木柜上的那个深蓝色手摇音乐盒：我每周日晚上转动它的手柄，听一小段音乐。我每周日早上擦拭书房窗台上的那个琥珀色沙漏。我浇水时尽量不把水洒到窗台上。我每周五傍晚用软布擦拭它。我给鱼缸换完水，会擦干矮柜上的水滴。我在书房的窗台上放了一个沙漏，这个沙漏是琥珀色的。",
+          "supportingMemoryCount": 8,
+          "supportingMemoryIds": [
+            "2c982887-e70f-5b1c-9a12-65876c484c0a",
+            "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+            "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+            "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+            "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+            "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+            "cac6df5c-68c0-5146-8f06-a52252eba55f",
+            "dacb688b-cdaa-5388-b37e-a7e1ab50af7d"
+          ],
+          "supportingMemoryVersionIds": [
+            "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+            "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+            "8d46da67-2606-527b-a287-28b5b3aef096",
+            "957aafeb-72fe-5b00-89a7-878bcf899834",
+            "97e509c3-86b1-582d-b650-a60ca63d57fe",
+            "a8b792e4-04fc-5f16-9add-12dce1feb644",
+            "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+            "d0a3b187-288b-5090-b9da-b1ebd4e3d071"
+          ]
+        },
+        {
+          "dimension": "knowledge",
+          "title": "知识与经验",
+          "status": "empty",
+          "narrative": null,
+          "supportingMemoryCount": 0,
+          "supportingMemoryIds": [],
+          "supportingMemoryVersionIds": []
+        },
+        {
+          "dimension": "emotion",
+          "title": "情感与牵挂",
+          "status": "empty",
+          "narrative": null,
+          "supportingMemoryCount": 0,
+          "supportingMemoryIds": [],
+          "supportingMemoryVersionIds": []
+        },
+        {
+          "dimension": "relationship",
+          "title": "家庭与社会关系",
+          "status": "empty",
+          "narrative": null,
+          "supportingMemoryCount": 0,
+          "supportingMemoryIds": [],
+          "supportingMemoryVersionIds": []
+        },
+        {
+          "dimension": "personality",
+          "title": "性格特征",
+          "status": "empty",
+          "narrative": null,
+          "supportingMemoryCount": 0,
+          "supportingMemoryIds": [],
+          "supportingMemoryVersionIds": []
+        },
+        {
+          "dimension": "value",
+          "title": "价值观与人生选择",
+          "status": "empty",
+          "narrative": null,
+          "supportingMemoryCount": 0,
+          "supportingMemoryIds": [],
+          "supportingMemoryVersionIds": []
+        },
+        {
+          "dimension": "habit",
+          "title": "习惯与偏好",
+          "status": "ready",
+          "narrative": "这些记忆记录了我我每周日晚上转动它的手柄，听一小段音乐、每周日早上擦拭书房窗台上的琥珀色沙漏、浇水时尽量不把水洒到窗台上、每周五傍晚用软布擦拭它、给鱼缸换完水，会擦干矮柜上的水滴的习惯与偏好。",
+          "supportingMemoryCount": 5,
+          "supportingMemoryIds": [
+            "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+            "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+            "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+            "cac6df5c-68c0-5146-8f06-a52252eba55f",
+            "dacb688b-cdaa-5388-b37e-a7e1ab50af7d"
+          ],
+          "supportingMemoryVersionIds": [
+            "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+            "8d46da67-2606-527b-a287-28b5b3aef096",
+            "97e509c3-86b1-582d-b650-a60ca63d57fe",
+            "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+            "d0a3b187-288b-5090-b9da-b1ebd4e3d071"
+          ]
+        },
+        {
+          "dimension": "goal",
+          "title": "目标与愿望",
+          "status": "empty",
+          "narrative": null,
+          "supportingMemoryCount": 0,
+          "supportingMemoryIds": [],
+          "supportingMemoryVersionIds": []
+        },
+        {
+          "dimension": "identity",
+          "title": "身份与角色",
+          "status": "empty",
+          "narrative": null,
+          "supportingMemoryCount": 0,
+          "supportingMemoryIds": [],
+          "supportingMemoryVersionIds": []
+        },
+        {
+          "dimension": "reflection",
+          "title": "反思与人生理解",
+          "status": "empty",
+          "narrative": null,
+          "supportingMemoryCount": 0,
+          "supportingMemoryIds": [],
+          "supportingMemoryVersionIds": []
+        }
+      ]
+    }
+  },
+  "selected": [
+    {
+      "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+      "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+      "memoryVersion": 1,
+      "sourceRef": {
+        "vaultId": "fixture",
+        "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+        "sourceVersion": 1
+      },
+      "citation": {
+        "vaultId": "fixture",
+        "memoryVersion": 1,
+        "memoryId": "2ca7c206-918b-5bc6-b512-45ec548bb7ae",
+        "memoryVersionId": "8d46da67-2606-527b-a287-28b5b3aef096",
+        "sourceId": "564c5c1c-4fa6-527f-a0ec-d17e5519edab",
+        "sourceVersion": 1,
+        "contentHash": "02876679e8c3a3e7f6b3ea1bccde1c1f5f83e9167e8af4a2c71265ba60f24e64"
+      }
+    },
+    {
+      "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+      "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+      "memoryVersion": 1,
+      "sourceRef": {
+        "vaultId": "fixture",
+        "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+        "sourceVersion": 1
+      },
+      "citation": {
+        "vaultId": "fixture",
+        "memoryVersion": 1,
+        "memoryId": "66009ec7-de6c-5cf8-8f4e-68ca409322ea",
+        "memoryVersionId": "957aafeb-72fe-5b00-89a7-878bcf899834",
+        "sourceId": "b6b54f7c-d9a5-5f5f-81e2-44bac28a6d0d",
+        "sourceVersion": 1,
+        "contentHash": "43bfcba59aa8182ccc5bcf6c97edc528144c8db7e536f09480f4211bced8b4d9"
+      }
+    },
+    {
+      "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+      "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+      "memoryVersion": 1,
+      "sourceRef": {
+        "vaultId": "fixture",
+        "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+        "sourceVersion": 1
+      },
+      "citation": {
+        "vaultId": "fixture",
+        "memoryVersion": 1,
+        "memoryId": "cac6df5c-68c0-5146-8f06-a52252eba55f",
+        "memoryVersionId": "ab53b4e7-c616-536d-974f-b3d7c1dd641f",
+        "sourceId": "02944c1d-5c23-534c-adb6-af5a7b527637",
+        "sourceVersion": 1,
+        "contentHash": "2eea2aa38b749a0476146f589e5e8d6f970db4fedc14fc31e3a1b98f5eda7aaa"
+      }
+    },
+    {
+      "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+      "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+      "memoryVersion": 1,
+      "sourceRef": {
+        "vaultId": "fixture",
+        "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+        "sourceVersion": 1
+      },
+      "citation": {
+        "vaultId": "fixture",
+        "memoryVersion": 1,
+        "memoryId": "dacb688b-cdaa-5388-b37e-a7e1ab50af7d",
+        "memoryVersionId": "d0a3b187-288b-5090-b9da-b1ebd4e3d071",
+        "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+        "sourceVersion": 1,
+        "contentHash": "20756aa45d62904d7e43be0622d122605a8c949ab0dace0e8e2d14ea571b473b"
+      }
+    },
+    {
+      "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+      "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+      "memoryVersion": 1,
+      "sourceRef": {
+        "vaultId": "fixture",
+        "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+        "sourceVersion": 1
+      },
+      "citation": {
+        "vaultId": "fixture",
+        "memoryVersion": 1,
+        "memoryId": "7e3a6396-f73a-591f-aedd-23dbcd7e3fbb",
+        "memoryVersionId": "97e509c3-86b1-582d-b650-a60ca63d57fe",
+        "sourceId": "4992d780-01ca-53f9-b340-cab090e7dff2",
+        "sourceVersion": 1,
+        "contentHash": "00f7d582c752e7afa67f99fe0ff01e99e87b40ccb6437be7e9fa2c085a272d4f"
+      }
+    },
+    {
+      "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+      "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+      "memoryVersion": 1,
+      "sourceRef": {
+        "vaultId": "fixture",
+        "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+        "sourceVersion": 1
+      },
+      "citation": {
+        "vaultId": "fixture",
+        "memoryVersion": 1,
+        "memoryId": "9458ec2f-0782-5c74-aec5-ad7b933715ad",
+        "memoryVersionId": "a8b792e4-04fc-5f16-9add-12dce1feb644",
+        "sourceId": "5da3f2b4-c0ed-5ede-8f7b-82f704e55901",
+        "sourceVersion": 1,
+        "contentHash": "1585be78c315d63ad675bfb785609b0e95304f52b43d264315aeeb25a15bd3c0"
+      }
+    },
+    {
+      "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+      "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+      "memoryVersion": 1,
+      "sourceRef": {
+        "vaultId": "fixture",
+        "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+        "sourceVersion": 1
+      },
+      "citation": {
+        "vaultId": "fixture",
+        "memoryVersion": 1,
+        "memoryId": "932719bc-0ff1-505f-bbb6-9a82348fdd88",
+        "memoryVersionId": "1f46b715-fedd-5fb8-ac0d-5d8c9c425365",
+        "sourceId": "2af7059e-4c67-51f6-94dd-e315531f31c0",
+        "sourceVersion": 1,
+        "contentHash": "4b3ded4727dbf86ca54f21b46d54a9d9c052a4dd1091f401d78a37654ad1d803"
+      }
+    },
+    {
+      "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+      "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+      "memoryVersion": 1,
+      "sourceRef": {
+        "vaultId": "fixture",
+        "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+        "sourceVersion": 1
+      },
+      "citation": {
+        "vaultId": "fixture",
+        "memoryVersion": 1,
+        "memoryId": "2c982887-e70f-5b1c-9a12-65876c484c0a",
+        "memoryVersionId": "6ba36212-8a33-5378-8c1b-ba9588f48b9f",
+        "sourceId": "13acc27f-c6a2-5336-8d22-804ce3dbc22a",
+        "sourceVersion": 1,
+        "contentHash": "6348948d578661792539c6ed0b3bfd758da7d5d6f3d1b924c5811dfb31edd85f"
+      }
+    }
+  ]
+}

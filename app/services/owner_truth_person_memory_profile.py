@@ -345,9 +345,10 @@ class OwnerTruthPersonMemoryProfileService:
         entries = tuple(_person_model_entry(item) for item in memories)
         bindings = self._confirmed_biography_bindings(context=context, entries=entries)
         source_fingerprint = _profile_source_fingerprint(entries)
-        from app.domain.owner_truth.person_biography import ALGORITHM, PROMPT_VERSION, MODEL_CONFIG_VERSION, digest
+        from app.domain.owner_truth.person_biography import ALGORITHM, PROMPT_VERSION, MODEL_CONFIG_VERSION, PHOTO_GROUPING_VERSION, digest
+        from app.domain.owner_truth.biography_object_links import RULE_VERSION
         source_fingerprint = sha256((source_fingerprint + PERSON_MEMORY_MODEL_ALGORITHM_VERSION +
-            (ALGORITHM + PROMPT_VERSION + self._composition_config + digest(bindings) if self._biography_topics else "legacy")).encode()).hexdigest()
+            (ALGORITHM + PROMPT_VERSION + RULE_VERSION + PHOTO_GROUPING_VERSION + self._composition_config + digest(bindings) if self._biography_topics else "legacy")).encode()).hexdigest()
         cached = self._cache.get(
             vault_id=context.vault_id,
             owner_subject_id=context.owner_subject_id,

@@ -15,6 +15,8 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
+from app.services.echo_reference_grounding import render_reference_context, reference_context
+
 from app.domain.owner_truth.formal_fact_eligibility import (
     FormalFactEligibilityError,
     evaluate_formal_fact_eligibility,
@@ -141,11 +143,11 @@ class OwnerTruthContextMaterializationService:
             )
 
         state = str(authority.get("state") or "")
+        typed_citations: list[dict[str, Any]] = []
         selected_context = deepcopy(list(shadow.get("selectedContext") or []))
         filtered_context = deepcopy(list(shadow.get("filteredContext") or []))
         fallbacks = list(shadow.get("fallbacks") or [])
         generation_context = _empty_generation_context()
-        typed_citations: list[dict[str, Any]] = []
 
         if state == "ready":
             projection = OwnerTruthMemoryProjectionService(self._store).read(context=context)
@@ -264,9 +266,15 @@ class OwnerTruthContextMaterializationService:
                 "Projection formal fact eligibility is invalid"
             ) from error
         semantic_groups = self._semantic_group_by_version(projection)
-        typed_citations: list[dict[str, Any]] = []
+        supporting_ids = {str(item.get("memoryVersionId") or "") for item in selected_context}
+        for version_id in tuple(supporting_ids):
+            supporting_ids.update((semantic_groups.get(version_id) or {}).get("supportingMemoryVersionIds") or [])
+        include_reference_context = any(
+            reference_context(entries_by_version.get(v, {})).get("referential") for v in supporting_ids
+        )
         rendered_entries: list[tuple[dict[str, Any], str]] = []
         rendered_group_ids: set[str] = set()
+        rendered_citations: list[list[dict[str, Any]]] = []
         for selected in selected_context:
             citation, entry = self._resolve_selected_entry(
                 selected=selected,
@@ -278,9 +286,9 @@ class OwnerTruthContextMaterializationService:
                 )
             semantic_group = semantic_groups.get(citation["memoryVersionId"])
             if semantic_group is None:
-                typed_citations.append(citation)
+                rendered_citations.append([citation])
                 rendered_entries.append(
-                    (citation, self._render_entry(entry=entry, citation=citation))
+                    (citation, self._render_entry(entry=entry, citation=citation, include_reference_context=include_reference_context))
                 )
                 continue
 
@@ -330,19 +338,23 @@ class OwnerTruthContextMaterializationService:
                 raise OwnerTruthContextMaterializationError(
                     "semantic representative is not part of its evidence"
                 )
-            typed_citations.extend(group_citations)
+            rendered_citations.append(group_citations)
             rendered_entries.append(
                 (
                     citation,
                     self._render_semantic_group(
                         group=semantic_group,
                         group_id=group_id,
+                        reference_entries=[entries_by_version[v] for v in supporting_version_ids],
+                        include_reference_context=include_reference_context,
                     ),
                 )
             )
             rendered_group_ids.add(group_id)
 
         text, source_count, truncated = self._bounded_generation_text(rendered_entries)
+        # Only cite whole context units that actually fit into the model input.
+        typed_citations = [c for group in rendered_citations[:source_count] for c in group]
         return typed_citations, {
             "version": OWNER_TRUTH_CONTEXT_MATERIALIZATION_VERSION,
             "text": text,
@@ -506,7 +518,7 @@ class OwnerTruthContextMaterializationService:
         }, entry
 
     @staticmethod
-    def _render_entry(*, entry: Mapping[str, Any], citation: Mapping[str, Any]) -> str:
+    def _render_entry(*, entry: Mapping[str, Any], citation: Mapping[str, Any], include_reference_context: bool = True) -> str:
         content_schema_version = str(entry.get("contentSchemaVersion") or "")
         if content_schema_version not in _SUPPORTED_CONTENT_SCHEMA_VERSIONS:
             raise OwnerTruthContextMaterializationError("Projection content schema is not supported")
@@ -529,6 +541,7 @@ class OwnerTruthContextMaterializationService:
         return (
             f"[confirmed-memory:{citation['memoryVersionId']}|{memory_kind}]\n"
             f"{value}"
+            + (f"\n{render_reference_context(entry)}" if include_reference_context else "")
         )
 
     @staticmethod
@@ -536,6 +549,8 @@ class OwnerTruthContextMaterializationService:
         *,
         group: Mapping[str, Any],
         group_id: str,
+        reference_entries: list[Mapping[str, Any]] | None = None,
+        include_reference_context: bool = True,
     ) -> str:
         memory_kind = _nonblank_text(
             group.get("memoryKind"),
@@ -549,7 +564,24 @@ class OwnerTruthContextMaterializationService:
             group.get("narrative"),
             field="semantic group narrative",
         )
-        return f"[confirmed-memory-group:{group_id}|{memory_kind}]\n{narrative}"
+        if not include_reference_context:
+            return f"[confirmed-memory-group:{group_id}|{memory_kind}]\n{narrative}"
+        if reference_entries and len(reference_entries) == 1:
+            return (f"[confirmed-memory-group:{group_id}|{memory_kind}]\n{narrative}\n"
+                    + render_reference_context(reference_entries[0]))
+        boundaries = "\n".join(
+            # Keep each supporting statement next to its own boundary. A merged
+            # narrative must not silently assign an orphan qualifier to a peer.
+            json.dumps({"statement": str((e.get("content") or {}).get("statement") or
+                                        (e.get("content") or {}).get("event") or
+                                        (e.get("content") or {}).get("summary") or
+                                        (e.get("content") or {}).get("claim") or
+                                        (e.get("content") or {}).get("expression") or ""),
+                        "referenceContext": reference_context(e)},
+                       ensure_ascii=False,separators=(",", ":"))
+            for e in (reference_entries or [{"content": {"statement": narrative}}])
+        )
+        return f"[confirmed-memory-group:{group_id}|{memory_kind}]\n{narrative}\n{boundaries}"
 
     @staticmethod
     def _bounded_generation_text(
