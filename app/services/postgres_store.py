@@ -4872,12 +4872,26 @@ class PostgresStore:
             INSERT INTO profiles (user_id, payload, updated_at)
             VALUES (%s, %s, NOW())
             ON CONFLICT (user_id) DO UPDATE SET
-                payload = EXCLUDED.payload,
+                payload = EXCLUDED.payload || CASE WHEN profiles.payload ? 'avatar' THEN jsonb_build_object('avatar', profiles.payload->'avatar') ELSE '{}'::jsonb END,
                 updated_at = NOW()
             RETURNING payload
             """,
             (user_id, item),
             commit=True,
+        )
+        return deepcopy(row["payload"])
+
+    def save_profile_avatar(self, user_id: str, avatar: Dict[str, Any]) -> Dict[str, Any]:
+        item = {"userId": user_id, "avatar": deepcopy(avatar), "updatedAt": self._now()}
+        row = self._fetchone(
+            """
+            INSERT INTO profiles (user_id, payload, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                payload = profiles.payload || EXCLUDED.payload,
+                updated_at = NOW()
+            RETURNING payload
+            """, (user_id, item), commit=True,
         )
         return deepcopy(row["payload"])
 

@@ -1,0 +1,40 @@
+{
+  "avatar-design.md": {
+    "workspaceSource": "02-设计文档/产品设计/2026-10-13-个人头像相册上传/完整设计与验收方案.md",
+    "sourceSHA256": "0de69fa01247d238ba5ac0a6700e3a840e05bcce1154c8f3c76dca56c227772c"
+  },
+  "expiry-repair-design.md": {
+    "workspaceSource": "02-问题修复/个人资料/2026-10-13-头像等待后保存失败/根因分析与修复方案.md",
+    "sourceSHA256": "a7e305457c3c4cef613d28a897ac13174ccb42f62a39dc10121d437ff41ad237"
+  },
+  "acceptance.md": {
+    "workspaceSource": "02-问题修复/个人资料/2026-10-13-头像等待后保存失败/实施与验收报告.md",
+    "sourceSHA256": "c6aba90e77288ce78ac7f1cb0b28126bbe5c776840451ced79dad39c128f5791"
+  },
+  "auth-observation.md": {
+    "workspaceSource": "02-问题修复/服务端与认证/2026-10-04-真机测试后登录态丢失/2026-10-14-头像验收前认证暂停.md",
+    "sourceSHA256": "e757795b2cb934c8fb1b80c111a2948055d76f7ee5959b70ee932267b9c61d7c"
+  },
+  "testedCodeFingerprints": {
+    "DreamJourney/Sources/Services/DreamJourneyBackendClient.swift": "fa09c4d89070f67c90e061b70e4e700cc6094bb5fd1b6b99bcb78bb2192ea0cf",
+    "DreamJourney/Sources/Services/UserManager.swift": "859186cd57a201f40a913301b22c12c30baf3b38d904b22b092fe0cc53115de3",
+    "DreamJourney/Sources/App/FeatureFlagService.swift": "2ee02caed93412bb15ad64e5417b09aba22962ef01d9d1149e2ba22e80decc13",
+    "DreamJourney/Sources/Services/ReleasePolicyStore.swift": "95f8e9b2c86629b6b4a94dd07bf965d555a8cfc729d0b81f284ace7914c12b2b",
+    "DreamJourney/Sources/Modules/Profile/ProfileSettingsViewController.swift": "f814b807c0fde9557bdea9de0880906d3db88b964877506415a4fbe13dee147f",
+    "DreamJourneyTests/OwnerTruthContractsTests.swift": "8673f9821e7942b02ce4ac525d7f3a16da86ce4a9ccda8c87b25d3bb6fc4e040",
+    "Scripts/QA/product-v4/profile-avatar-contract/run.py": "08826d123682262a7afafcbee9cc4bcc028222bf2a4548f55161e005b0fced4d",
+    "Scripts/QA/product-v4/profile-avatar-contract/README.md": "9b492ea3ffb0afb544b0445af738cda53d608ed6bd1903b820b30e30ff7cc25a"
+  },
+  "backendTestedFingerprints": {
+    "head": "d2e9b9b4e25e75e25a926a17180a44fa5e806cc4",
+    "changed": {
+      "app/main.py": "c1cdf20bea7b2961913ec51fd21ccdaec15408ade0e1c7d4db7b7b45691b169b",
+      "app/services/in_memory_store.py": "c984f222cd0f12b6e0f409d451f4ae1252f5a0e735f1cd0161e15f6df6594d00",
+      "app/services/postgres_store.py": "b176545aa8b63b2d4ad150a300d41568a6064d649c16639346ee0485913b5c4b",
+      "requirements.txt": "6bf1d2d5e4256c284be3e7e2ee4db2a7b49cb57e3fc011d2a7df5cba428a97c9",
+      "app/services/profile_avatar.py": "2ef4bac7f66f38b605cf94257860daffbe7238013adee8b5359965c438b400b7",
+      "tests/test_profile_avatar.py": "0acedbfd2fb577e1c8a54f790e8278276f847505d927e376c5a5d388e77dfbd0"
+    },
+    "trackedUnchangedCount": 1707
+  }
+}

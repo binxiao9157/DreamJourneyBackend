@@ -199,6 +199,7 @@ class InMemoryStore:
         self._kb_changes: Dict[str, List[Dict[str, Any]]] = {}
         self._kb_change_feed_minimum_since_revisions: Dict[str, int] = {}
         self._kb_operation_receipts: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._profile_lock = RLock()
         self._kb_lock = RLock()
         self._archive_lock = RLock()
         self._owner_truth_lock = RLock()
@@ -3029,15 +3030,27 @@ class InMemoryStore:
         return None if receipt is None else deepcopy(receipt)
 
     def save_profile(self, user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
-        item = deepcopy(profile)
-        item["userId"] = user_id
-        item["updatedAt"] = self._now()
-        self._profiles[user_id] = item
-        return deepcopy(item)
+        with self._profile_lock:
+            item = deepcopy(profile)
+            previous = self._profiles.get(user_id, {})
+            if "avatar" in previous:
+                item["avatar"] = deepcopy(previous["avatar"])
+            item["userId"] = user_id
+            item["updatedAt"] = self._now()
+            self._profiles[user_id] = item
+            return deepcopy(item)
+
+    def save_profile_avatar(self, user_id: str, avatar: Dict[str, Any]) -> Dict[str, Any]:
+        with self._profile_lock:
+            item = deepcopy(self._profiles.get(user_id, {}))
+            item.update(userId=user_id, avatar=deepcopy(avatar), updatedAt=self._now())
+            self._profiles[user_id] = item
+            return deepcopy(item)
 
     def get_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
-        profile = self._profiles.get(user_id)
-        return None if profile is None else deepcopy(profile)
+        with self._profile_lock:
+            profile = self._profiles.get(user_id)
+            return None if profile is None else deepcopy(profile)
 
     def save_password_credential(self, user_id: str, credential: Dict[str, Any]) -> Dict[str, Any]:
         item = deepcopy(credential)

@@ -23,6 +23,7 @@ try:
 except ImportError as exc:  # pragma: no cover - exercised only without runtime deps
     raise RuntimeError("FastAPI is not installed. Run `pip install -r requirements.txt`.") from exc
 
+from app.services.profile_avatar import normalize_avatar
 from app.core.config import settings
 from app.observability.metric_dispatch import OperationMetricDispatcher
 from app.observability.voice_launch_diagnostics import VoiceLaunchDiagnosticQueue
@@ -17468,8 +17469,19 @@ def _mark_voice_profile_retry_submission_failed(
 @app.post("/profile")
 def save_profile(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     _, owned_payload = _principal_owned_payload(request, payload)
-    profile = _sanitize_profile_payload(owned_payload)
-    saved = store.save_profile(profile["userId"], profile)
+    if owned_payload.get("operation") == "updateAvatar":
+        if set(owned_payload) - {"userId", "operation", "avatarJPEGBase64"}:
+            raise HTTPException(status_code=400, detail="avatarFieldsInvalid")
+        try:
+            avatar = normalize_avatar(owned_payload.get("avatarJPEGBase64"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        saved = store.save_profile_avatar(owned_payload["userId"], avatar)
+    else:
+        if any(key in owned_payload for key in ("operation", "avatar", "avatarJPEGBase64")):
+            raise HTTPException(status_code=400, detail="profileOperationInvalid")
+        profile = _sanitize_profile_payload(owned_payload)
+        saved = store.save_profile(profile["userId"], profile)
     return {"status": "saved", "profile": saved}
 
 
