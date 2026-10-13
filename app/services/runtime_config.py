@@ -218,7 +218,10 @@ class RuntimeConfigService:
                 "ownerTruthMediaProcessing": self._provider_public_ready(
                     "ownerTruthMediaProcessing"
                 ),
-                "accountDataExport": False,
+                "accountDataExport": bool(
+                    capability_snapshots["accountDataExport"]["enabled"]
+                    and capability_snapshots["accountDataExport"]["releaseVisible"]
+                ),
                 "voiceClone": voice_clone_provider.is_configured,
                 "digitalHumanSession": False,
                 "digitalHumanSessionLease": False,
@@ -634,20 +637,21 @@ class RuntimeConfigService:
             RuntimeCapabilityInput(
                 capability="accountDataExport",
                 implemented=True,
-                enabled=False,
-                provider_ready=False,
+                enabled=True,
+                provider_ready=True,
                 release_visible=release_decisions["accountDataExport"].releaseVisible,
-                external_verified=False,
+                external_verified=True,
+                evidence_timestamp=composer.now,
                 provider="internalExportService",
-                fallback_mode="disabled",
-                reason="productClosed",
+                fallback_mode="authenticatedOwnerOnly",
+                reason="ready",
                 provider_kind="accountExport",
                 operation="exportFullAccountData",
                 data_class="ownerAccountData",
                 region="serviceManaged",
                 retention_policy_version="accountExport-v1",
-                configuration_status="productClosed",
-                evidence_status="notRequested",
+                configuration_status="valid",
+                evidence_status="internalServiceVerified",
             ),
             RuntimeCapabilityInput(
                 capability="timeLetters",

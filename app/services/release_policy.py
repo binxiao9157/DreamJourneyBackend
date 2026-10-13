@@ -542,6 +542,8 @@ class ReleasePolicyService:
     # server-policy controlled for emergency revocation and minimum-client
     # enforcement, but it must not depend on Closed Pilot membership.
     _AUTHENTICATED_OWNER_VISIBLE = {
+        "accountDataExport",
+        "accountPasswordChange",
         "familyManagement",
         "familySpace",
         "careDashboard",
@@ -595,7 +597,6 @@ class ReleasePolicyService:
     # Product-confirmed exclusions override provider readiness, rollout
     # cohorts, client claims, and default-stage shadow behavior.
     _PRODUCT_CLOSED_FEATURES = {
-        "accountDataExport",
         "archiveAudioUpload",
         "archiveVideoUpload",
         "digitalHumanLivePanel",

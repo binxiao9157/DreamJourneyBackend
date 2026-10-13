@@ -144,7 +144,6 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertFalse(decisions["digitalHumanLivePanel"].releaseVisible)
         self.assertEqual(decisions["digitalHumanLivePanel"].reason, "productClosed")
         for feature in [
-            "accountDataExport",
             "archiveAudioUpload",
             "archiveVideoUpload",
             "kbliteUserSurface",
@@ -314,21 +313,32 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertFalse(decision.enabled)
         self.assertEqual(decision.reason, "externalVerificationRequired")
 
-    def test_full_account_data_export_is_product_closed_for_the_client(self):
-        snapshot = ReleasePolicyService().build_snapshot(
-            audience="owner",
-            cohort="closedPilotAdultSelf",
-            client_build=1,
-            requested_feature="accountDataExport",
-        )
-
-        decision = snapshot.features[0]
-        self.assertFalse(decision.enabled)
-        self.assertFalse(decision.releaseVisible)
-        self.assertEqual(decision.releaseStage, "M0")
-        self.assertEqual(decision.reason, "productClosed")
-        self.assertIsNone(decision.requiredCapability)
-        self.assertTrue(decision.capabilityReady)
+    def test_profile_export_and_password_open_for_regular_owner_but_not_other_audiences(self):
+        for feature in ("accountDataExport", "accountPasswordChange"):
+            for cohort in ("authenticatedOwner", "closedPilotAdultSelf"):
+                decision = ReleasePolicyService().build_snapshot(
+                    audience="owner", cohort=cohort, client_build=1,
+                    requested_feature=feature,
+                ).features[0]
+                self.assertTrue(decision.enabled)
+                self.assertTrue(decision.releaseVisible)
+                self.assertEqual(decision.reason, "authenticatedOwnerCore")
+            for audience, cohort in (("owner", "anonymous"), ("family", "authenticatedOwner"), ("visitor", "authenticatedOwner")):
+                decision = ReleasePolicyService().build_snapshot(
+                    audience=audience, cohort=cohort, client_build=1,
+                    requested_feature=feature,
+                ).features[0]
+                self.assertFalse(decision.enabled)
+            for service, reason in (
+                (ReleasePolicyService(emergency_disabled_features={feature}), "emergencyRevoked"),
+                (ReleasePolicyService(min_client_build=2), "clientBelowMinimum"),
+            ):
+                decision = service.build_snapshot(
+                    audience="owner", cohort="authenticatedOwner", client_build=1,
+                    requested_feature=feature,
+                ).features[0]
+                self.assertFalse(decision.enabled)
+                self.assertEqual(decision.reason, reason)
 
     def test_owner_truth_candidate_review_requires_explicit_closed_pilot_feature_grant(self):
         decision = ReleasePolicyService(
@@ -529,7 +539,6 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertEqual(
             service.public_descriptor()["productClosedFeatures"],
             [
-                "accountDataExport",
                 "archiveAudioUpload",
                 "archiveVideoUpload",
                 "digitalHumanLivePanel",
@@ -717,7 +726,6 @@ class ReleasePolicyServiceTests(unittest.TestCase):
         self.assertTrue(all(not item.releaseVisible for item in snapshot.features))
         reasons = {item.feature: item.reason for item in snapshot.features}
         product_closed = {
-            "accountDataExport",
             "archiveAudioUpload",
             "archiveVideoUpload",
             "digitalHumanLivePanel",

@@ -176,7 +176,7 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             ):
                 self.assertIsInstance(snapshot[field], str, f"{capability}.{field}")
 
-        for capability in ("familyManagement", "familySpace"):
+        for capability in ("familyManagement", "familySpace", "accountDataExport"):
             family = snapshots[capability]
             self.assertTrue(family["implemented"], capability)
             self.assertTrue(family["enabled"], capability)
@@ -184,6 +184,15 @@ class RuntimeCapabilityConfigTests(unittest.TestCase):
             self.assertTrue(family["releaseVisible"], capability)
             self.assertTrue(family["externalVerified"], capability)
             self.assertEqual(family["reason"], "ready")
+
+    def test_account_export_public_descriptor_follows_emergency_revocation(self):
+        normal = RuntimeConfigService(Settings()).public_config()
+        self.assertTrue(normal["capabilities"]["accountDataExport"])
+        revoked = RuntimeConfigService(Settings(
+            release_policy_emergency_disabled_features="accountDataExport"
+        )).public_config()
+        self.assertFalse(revoked["capabilities"]["accountDataExport"])
+        self.assertFalse(revoked["capabilitySnapshots"]["accountDataExport"]["releaseVisible"])
 
     def test_text_only_image_provider_and_mock_storage_are_not_provider_ready(self):
         config = RuntimeConfigService(

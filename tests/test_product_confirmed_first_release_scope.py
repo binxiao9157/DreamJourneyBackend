@@ -28,7 +28,6 @@ class ProductConfirmedFirstReleaseScopeTests(unittest.TestCase):
             "archiveAudioUpload",
             "archiveVideoUpload",
             "kbliteUserSurface",
-            "accountDataExport",
         ):
             for audience, cohort in (
                 ("owner", "authenticatedOwner"),
@@ -74,7 +73,6 @@ class ProductConfirmedFirstReleaseScopeTests(unittest.TestCase):
             "archiveAudioUpload",
             "archiveVideoUpload",
             "kbliteUserSurface",
-            "accountDataExport",
         ):
             self.assertFalse(capabilities[capability], capability)
             snapshot = snapshots[capability]

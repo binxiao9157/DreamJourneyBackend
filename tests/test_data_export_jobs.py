@@ -1,4 +1,6 @@
 import json
+from hashlib import sha256
+from uuid import uuid4
 from io import BytesIO
 import unittest
 from unittest.mock import patch
@@ -20,23 +22,14 @@ class DataExportJobRouteTests(unittest.TestCase):
         self.previous_legacy_login = main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED
         self.previous_release_policy_service = main_module.RELEASE_POLICY_SERVICE
         self.previous_release_policy_gate = main_module.RELEASE_POLICY_COMMAND_GATE
-        self.product_closed_patch = patch.object(
-            ReleasePolicyService,
-            "_PRODUCT_CLOSED_FEATURES",
-            ReleasePolicyService._PRODUCT_CLOSED_FEATURES.difference(
-                {"accountDataExport"}
-            ),
-        )
-        self.product_closed_patch.start()
-
         self.store = InMemoryStore()
         main_module.store = self.store
         main_module.AUTH_ROUTE_MODE = "enforce"
         main_module.AUTH_OWNERSHIP_MODE = "enforce"
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = True
         policy = ReleasePolicyService(
-            shadow_mode=True,
-            enforce_default_closed_stages=False,
+            shadow_mode=False,
+            enforce_default_closed_stages=True,
         )
         main_module.RELEASE_POLICY_SERVICE = policy
         main_module.RELEASE_POLICY_COMMAND_GATE = ReleasePolicyCommandGate(policy)
@@ -49,7 +42,6 @@ class DataExportJobRouteTests(unittest.TestCase):
         main_module.AUTH_LEGACY_PHONE_LOGIN_ENABLED = self.previous_legacy_login
         main_module.RELEASE_POLICY_SERVICE = self.previous_release_policy_service
         main_module.RELEASE_POLICY_COMMAND_GATE = self.previous_release_policy_gate
-        self.product_closed_patch.stop()
 
     def _login(self, phone: str) -> dict:
         response = self.client.post(
@@ -57,11 +49,49 @@ class DataExportJobRouteTests(unittest.TestCase):
             json={"phone": phone, "nickname": "数据副本测试用户"},
         )
         self.assertEqual(response.status_code, 200, response.text)
-        return response.json()
+        login = response.json()
+        policy = self.client.get(
+            "/v2/release-policy",
+            params={"audience": "owner", "clientBuild": 1, "feature": "accountDataExport"},
+            headers={"Authorization": f"Bearer {login['auth']['accessToken']}"},
+        )
+        self.assertEqual(policy.status_code, 200, policy.text)
+        snapshot = policy.json()
+        self.assertEqual(snapshot["cohort"], "authenticatedOwner")
+        self.assertTrue(snapshot["features"][0]["enabled"])
+        login["releasePolicy"] = snapshot
+        return login
 
     @staticmethod
     def _headers(login: dict) -> dict:
-        return {"Authorization": f"Bearer {login['auth']['accessToken']}"}
+        return {
+            "Authorization": f"Bearer {login['auth']['accessToken']}",
+            "X-DreamJourney-Client-Build": "1",
+            "X-DreamJourney-Feature": "accountDataExport",
+            "X-DreamJourney-Feature-Decision-Id": str(uuid4()),
+            "X-DreamJourney-Feature-Allowed": "true",
+            "X-DreamJourney-Policy-Version": login["releasePolicy"]["policyVersion"],
+            "X-DreamJourney-Policy-Revision": str(login["releasePolicy"]["policyRevision"]),
+            "X-DreamJourney-Account-Generation": sha256(login["auth"]["sessionId"].encode()).hexdigest()[:24],
+        }
+
+    def test_formal_export_rejects_missing_policy_and_emergency_revocation(self):
+        owner = self._login("13900008808")
+        missing = self.client.post(
+            "/auth/data-export/jobs",
+            headers={"Authorization": f"Bearer {owner['auth']['accessToken']}"},
+            json={"requestKey": "missing-capture"},
+        )
+        self.assertEqual(missing.status_code, 403)
+        self.assertEqual(missing.json()["detail"]["reason"], "missingCapturedPolicy")
+        headers = self._headers(owner)
+        main_module.RELEASE_POLICY_SERVICE.emergency_disabled_features.add("accountDataExport")
+        denied = self.client.post(
+            "/auth/data-export/jobs", headers=headers,
+            json={"requestKey": "emergency-revoked"},
+        )
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()["detail"]["reason"], "emergencyRevoked")
 
     def test_job_is_owner_scoped_idempotent_and_downloads_partial_manifest(self) -> None:
         owner = self._login("13900008801")
