@@ -204,6 +204,7 @@ class RouteOwnershipRegistry:
                 public,
                 "publicIdentityChallengeState",
             ),
+            _rule("POST", "/v2/auth/username/register", public, "publicUsernameRegistration"),
             _rule("POST", "/auth/login", public, "publicLogin"),
             _rule(
                 "POST",

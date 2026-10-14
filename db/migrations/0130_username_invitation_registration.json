@@ -1,0 +1,19 @@
+{
+  "version": "0130",
+  "name": "username_invitation_registration",
+  "phase": "expand",
+  "compatibility": "additive",
+  "summary": "Allow invite-only username identities; phone challenges stay unchanged.",
+  "operations": [
+    "extend identity_bindings identity type constraint"
+  ],
+  "rollback": "Disable username registration. Retain created identities and password login; do not drop accounts.",
+  "production": {
+    "requiresExplicitApproval": true,
+    "requiresDryRun": true,
+    "requiresBackup": true,
+    "requiresPostgresIntegrationEvidence": true,
+    "rewritesUserFacts": false,
+    "invalidatesDerivedProjections": false
+  }
+}

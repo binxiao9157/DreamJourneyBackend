@@ -93,6 +93,7 @@ class RuntimeConfigService:
         realtime_voice = TokenService(self.settings).realtime_config(user_id="runtime-capability")
         identity_challenge = identity_challenge_runtime_descriptor(self.settings)
         password_authentication = password_authentication_runtime_descriptor(
+            username_registration_enabled=self.settings.username_registration_enabled,
             configured=bool(
                 self.settings.password_authentication_enabled
                 and self.settings.identity_binding_hmac_key

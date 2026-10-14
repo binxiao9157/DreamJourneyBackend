@@ -80,8 +80,9 @@ class CrossAccountAuthorizationPolicy:
 
     _registry = RouteOwnershipRegistry()
 
-    def __init__(self, store: Any):
+    def __init__(self, store: Any, *, family_subject_resolver=None):
         self.store = store
+        self.family_subject_resolver = family_subject_resolver or stable_user_id
         self.registry = self._registry
 
     def evaluate(
@@ -347,7 +348,7 @@ class CrossAccountAuthorizationPolicy:
         phone = str(payload.get("phone") or "").strip()
         if not phone:
             return self._defer("familyInvitationAccept", "routeValidationPending")
-        if stable_user_id(phone) != principal_user_id:
+        if self.family_subject_resolver(phone) != principal_user_id:
             return self._deny("familyInvitationAccept", "invitationPrincipalMismatch")
         return AuthorizationPolicyDecision(
             policy_id="familyInvitationAccept",
@@ -368,7 +369,7 @@ class CrossAccountAuthorizationPolicy:
         member = self._family_member(owner_user_id, member_id)
         if member is None:
             return self._defer("familyMemberAccept", "resourceValidationPending")
-        if principal_user_id in self._family_member_principal_ids(member):
+        if principal_user_id == self.family_subject_resolver(str(member.get("phone") or "")):
                 return AuthorizationPolicyDecision(
                 policy_id="familyMemberAccept",
                 decision="allowRecipient",

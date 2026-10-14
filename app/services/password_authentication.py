@@ -660,6 +660,7 @@ def password_authentication_runtime_descriptor(
     configured: bool,
     production_recovery_ready: bool,
     test_recovery_ready: bool,
+    username_registration_enabled: bool = False,
 ) -> Dict[str, Any]:
     recovery_ready = bool(configured and production_recovery_ready)
     test_only_recovery_ready = bool(
@@ -694,6 +695,9 @@ def password_authentication_runtime_descriptor(
                 )
             )
         ),
+        "usernameLoginReady": configured,
+        "usernameRegistrationReady": configured and username_registration_enabled,
+        "usernameRegistrationEndpoint": "/v2/auth/username/register",
         "loginEndpoint": "/v2/auth/password/login",
         "setupEndpoint": "/v2/auth/password/setup",
         "changeEndpoint": "/v2/auth/password/change",

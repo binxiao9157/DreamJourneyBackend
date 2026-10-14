@@ -571,6 +571,8 @@ class IdentityBindingService:
                 "identity binding HMAC key registration is not ready"
             )
         normalized_type = self._identity_type(identity_type)
+        if normalized_type != "phone":
+            raise IdentityChallengeValidationError("SMS requires a phone identity")
         normalized_target = self._target(normalized_type, target)
         normalized_purpose = str(purpose or "login").strip().lower() or "login"
         if normalized_purpose not in IDENTITY_CHALLENGE_PURPOSES:
@@ -1118,12 +1120,17 @@ class IdentityBindingService:
     @staticmethod
     def _identity_type(value: str) -> str:
         normalized = str(value or "phone").strip().lower() or "phone"
-        if normalized != "phone":
+        if normalized not in {"phone", "username"}:
             raise IdentityChallengeValidationError("unsupported identity type")
         return normalized
 
     @staticmethod
     def _target(identity_type: str, value: str) -> str:
+        if identity_type == "username":
+            name = str(value or "").strip().lower()
+            if re.fullmatch(r"[a-z][a-z0-9_]{3,31}", name) is None:
+                raise IdentityChallengeValidationError("invalid username")
+            return name
         if identity_type != "phone":
             raise IdentityChallengeValidationError("unsupported identity type")
         raw_value = str(value or "").strip()

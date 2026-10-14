@@ -8720,6 +8720,39 @@ class PostgresStore:
         item.setdefault("invitationURL", "")
         return self._insert_payload("family_members", user_id, item)
 
+    def get_family_invitation(self, code: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone("SELECT payload FROM family_members WHERE payload->>'invitationCode' = %s LIMIT 1", (code,))
+        return deepcopy(row["payload"]) if row else None
+
+    def register_invited_username(self, *, code: str, reference: Dict[str, Any], subject_id: str,
+                                  binding_id: str, credential: Dict[str, Any], nickname: str,
+                                  now_iso: str) -> bool:
+        from app.services.username_registration import invitation_is_available
+        with self.request_unit_of_work(correlation_id="username-register-" + uuid.uuid4().hex,
+                                       command_id="invitedUsernameRegistration"):
+            self._fetchone("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0)) AS locked",
+                ("username-register:" + reference["targetHash"],))
+            row = self._fetchone("SELECT user_id, id, payload FROM family_members WHERE payload->>'invitationCode' = %s FOR UPDATE", (code,))
+            item = deepcopy(row["payload"]) if row else None
+            if not invitation_is_available(item, now_iso):
+                return False
+            existing = self.get_identity_binding_by_target(identity_type="username",
+                target_hash_key_version=reference["targetHashKeyVersion"], target_hash=reference["targetHash"])
+            if existing:
+                return False
+            self._fetchone("INSERT INTO subjects (id, status) VALUES (%s, 'active') RETURNING id", (subject_id,), commit=True)
+            self._fetchone("""INSERT INTO identity_bindings (id, subject_id, identity_type,
+                target_hash_key_version, target_hash, provider_mode, status, verified_at)
+                VALUES (%s, %s, 'username', %s, %s, 'invitedUsernamePassword', 'active', %s) RETURNING id""",
+                (binding_id, subject_id, reference["targetHashKeyVersion"], reference["targetHash"], now_iso), commit=True)
+            self.save_password_credential(subject_id, credential)
+            self.save_profile(subject_id, {"userId": subject_id, "nickname": nickname})
+            item["registrationSubjectId"] = subject_id
+            item["registeredAt"] = now_iso
+            self._fetchone("UPDATE family_members SET payload=%s WHERE user_id=%s AND id=%s RETURNING id",
+                (item, row["user_id"], row["id"]), commit=True)
+            return True
+
     def list_family_members(self, user_id: str) -> List[Dict[str, Any]]:
         return self._list_payloads("family_members", user_id)
 
@@ -9556,84 +9589,94 @@ class PostgresStore:
             )
         return receipts
 
-    def accept_family_member(self, user_id: str, member_id: str, phone: str) -> Optional[Dict[str, Any]]:
-        row = self._fetchone(
-            """
-            SELECT payload FROM family_members
-            WHERE user_id = %s AND id = %s
-            """,
-            (user_id, member_id),
-        )
-        if row is None:
-            return None
+    def accept_family_member(self, user_id: str, member_id: str, phone: str, accepted_subject_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        with self.request_unit_of_work(correlation_id="family-accept-" + uuid.uuid4().hex, command_id="familyAccept"):
+            row = self._fetchone(
+                """
+                SELECT payload FROM family_members
+                WHERE user_id = %s AND id = %s FOR UPDATE
+                """,
+                (user_id, member_id),
+            )
+            if row is None:
+                return None
 
-        item = deepcopy(row["payload"])
-        item["ownerUserId"] = item.get("ownerUserId") or item.get("userId")
-        expected_phone = self._normalized_phone(str(item.get("phone") or ""))
-        if expected_phone and self._normalized_phone(phone) != expected_phone:
-            return None
-        if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
-            return None
-        if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
-            return deepcopy(item)
-
-        item["accessStatus"] = "active"
-        item["invitationStatus"] = "accepted"
-        item["isOnline"] = True
-        item["acceptedAt"] = self._now()
-        item["lastUpdated"] = "刚刚接受邀请"
-
-        updated = self._fetchone(
-            """
-            UPDATE family_members
-            SET payload = %s
-            WHERE user_id = %s AND id = %s
-            RETURNING payload
-            """,
-            (item, user_id, member_id),
-            commit=True,
-        )
-        return None if updated is None else deepcopy(updated["payload"])
-
-    def accept_family_invitation_code(self, invitation_code: str, phone: str) -> Optional[Dict[str, Any]]:
-        row = self._fetchone(
-            """
-            SELECT payload FROM family_members
-            WHERE payload->>'invitationCode' = %s
-            LIMIT 1
-            """,
-            (invitation_code,),
-        )
-        if row is None:
-            return None
-
-        item = deepcopy(row["payload"])
-        expected_phone = self._normalized_phone(str(item.get("phone") or ""))
-        if expected_phone and self._normalized_phone(phone) != expected_phone:
-            return None
-        if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
-            return None
-        if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
+            item = deepcopy(row["payload"])
             item["ownerUserId"] = item.get("ownerUserId") or item.get("userId")
-            return deepcopy(item)
+            expected_phone = self._normalized_phone(str(item.get("phone") or ""))
+            if expected_phone and self._normalized_phone(phone) != expected_phone:
+                return None
+            if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
+                return None
+            if accepted_subject_id and item.get("acceptedUserId") not in (None, "", accepted_subject_id):
+                return None
+            if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
+                return deepcopy(item)
 
-        item["accessStatus"] = "active"
-        item["invitationStatus"] = "accepted"
-        item["isOnline"] = True
-        item["acceptedAt"] = self._now()
-        item["lastUpdated"] = "刚刚接受邀请"
+            if accepted_subject_id:
+                item["acceptedUserId"] = accepted_subject_id
+            item["accessStatus"] = "active"
+            item["invitationStatus"] = "accepted"
+            item["isOnline"] = True
+            item["acceptedAt"] = self._now()
+            item["lastUpdated"] = "刚刚接受邀请"
 
-        updated = self._fetchone(
-            """
-            UPDATE family_members
-            SET payload = %s
-            WHERE user_id = %s AND id = %s
-            RETURNING payload
-            """,
-            (item, item.get("userId"), item.get("id")),
-            commit=True,
-        )
-        return None if updated is None else deepcopy(updated["payload"])
+            updated = self._fetchone(
+                """
+                UPDATE family_members
+                SET payload = %s
+                WHERE user_id = %s AND id = %s
+                RETURNING payload
+                """,
+                (item, user_id, member_id),
+                commit=True,
+            )
+            return None if updated is None else deepcopy(updated["payload"])
+
+    def accept_family_invitation_code(self, invitation_code: str, phone: str, accepted_subject_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        with self.request_unit_of_work(correlation_id="family-accept-" + uuid.uuid4().hex, command_id="familyAccept"):
+            row = self._fetchone(
+                """
+                SELECT payload FROM family_members
+                WHERE payload->>'invitationCode' = %s
+                LIMIT 1 FOR UPDATE
+                """,
+                (invitation_code,),
+            )
+            if row is None:
+                return None
+
+            item = deepcopy(row["payload"])
+            expected_phone = self._normalized_phone(str(item.get("phone") or ""))
+            if expected_phone and self._normalized_phone(phone) != expected_phone:
+                return None
+            if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
+                return None
+            if accepted_subject_id and item.get("acceptedUserId") not in (None, "", accepted_subject_id):
+                return None
+            if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
+                item["ownerUserId"] = item.get("ownerUserId") or item.get("userId")
+                return deepcopy(item)
+
+            if accepted_subject_id:
+                item["acceptedUserId"] = accepted_subject_id
+            item["accessStatus"] = "active"
+            item["invitationStatus"] = "accepted"
+            item["isOnline"] = True
+            item["acceptedAt"] = self._now()
+            item["lastUpdated"] = "刚刚接受邀请"
+
+            updated = self._fetchone(
+                """
+                UPDATE family_members
+                SET payload = %s
+                WHERE user_id = %s AND id = %s
+                RETURNING payload
+                """,
+                (item, item.get("userId"), item.get("id")),
+                commit=True,
+            )
+            return None if updated is None else deepcopy(updated["payload"])
 
     def revoke_family_member(self, user_id: str, member_id: str) -> Optional[Dict[str, Any]]:
         row = self._fetchone(
@@ -9916,8 +9959,8 @@ class PostgresStore:
             "resourceId": row.get("resource_id"),
             "operations": list(operations) if isinstance(operations, (list, tuple)) else [],
             "status": str(row["status"]),
-            "expiresAt": cls._iso_value(row.get("expires_at")),
-            "revokedAt": cls._iso_value(row.get("revoked_at")),
+            "expiresAt": cls._iso_value(row["expires_at"]) if row.get("expires_at") is not None else None,
+            "revokedAt": cls._iso_value(row["revoked_at"]) if row.get("revoked_at") is not None else None,
             "rowVersion": int(row.get("row_version") or 1),
             "createdAt": cls._iso_value(row.get("created_at")),
             "updatedAt": cls._iso_value(row.get("updated_at")),

@@ -66,6 +66,7 @@ class Settings:
     identity_challenge_ttl_seconds: int = 300
     identity_challenge_max_attempts: int = 5
     identity_challenge_retry_after_seconds: int = 30
+    username_registration_enabled: bool = False
     password_authentication_enabled: bool = True
     # A machine-managed, target-restricted login lane for synthetic QA
     # accounts. It is disabled by default and accepts only explicitly
@@ -478,6 +479,7 @@ class Settings:
                 "IDENTITY_CHALLENGE_RETRY_AFTER_SECONDS",
                 cls.identity_challenge_retry_after_seconds,
             ),
+            username_registration_enabled=_env_bool("USERNAME_REGISTRATION_ENABLED", cls.username_registration_enabled),
             password_authentication_enabled=_env_bool(
                 "PASSWORD_AUTHENTICATION_ENABLED",
                 cls.password_authentication_enabled,

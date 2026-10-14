@@ -4902,6 +4902,44 @@ class InMemoryStore:
         self._family_members.setdefault(user_id, []).append(item)
         return deepcopy(item)
 
+    def get_family_invitation(self, code: str) -> Optional[Dict[str, Any]]:
+        for members in self._family_members.values():
+            for item in members:
+                if item.get("invitationCode") == code:
+                    return deepcopy(item)
+        return None
+
+    def register_invited_username(self, *, code: str, reference: Dict[str, Any], subject_id: str,
+                                  binding_id: str, credential: Dict[str, Any], nickname: str,
+                                  now_iso: str) -> bool:
+        from app.services.username_registration import invitation_is_available
+        with self._identity_lock, self._delegated_access_lock:
+            item = next((m for rows in self._family_members.values() for m in rows
+                         if m.get("invitationCode") == code), None)
+            key = ("username", reference["targetHashKeyVersion"], reference["targetHash"])
+            if not invitation_is_available(item, now_iso) or key in self._identity_binding_ids_by_target:
+                return False
+            binding = {"bindingId": binding_id, "subjectId": subject_id, **reference,
+                "providerMode": "invitedUsernamePassword", "status": "active", "verifiedAt": now_iso, "createdAt": now_iso}
+            try:
+                self._subjects[subject_id] = {"subjectId": subject_id, "status": "active", "createdAt": now_iso}
+                self._identity_bindings[binding_id] = binding
+                self._identity_binding_ids_by_target[key] = binding_id
+                self._password_credentials[subject_id] = {**deepcopy(credential), "userId": subject_id, "updatedAt": now_iso}
+                self.save_profile(subject_id, {"userId": subject_id, "nickname": nickname})
+                item["registrationSubjectId"] = subject_id
+                item["registeredAt"] = now_iso
+            except Exception:
+                self._subjects.pop(subject_id, None)
+                self._identity_bindings.pop(binding_id, None)
+                self._identity_binding_ids_by_target.pop(key, None)
+                self._password_credentials.pop(subject_id, None)
+                self._profiles.pop(subject_id, None)
+                item.pop("registrationSubjectId", None)
+                item.pop("registeredAt", None)
+                raise
+            return True
+
     def list_family_members(self, user_id: str) -> List[Dict[str, Any]]:
         return deepcopy(self._family_members.get(user_id, []))
 
@@ -5433,45 +5471,19 @@ class InMemoryStore:
         relationship["grantEpoch"] = int(relationship.get("grantEpoch") or 0) + 1
         relationship["updatedAt"] = self._now()
 
-    def accept_family_member(self, user_id: str, member_id: str, phone: str) -> Optional[Dict[str, Any]]:
-        members = self._family_members.get(user_id, [])
-        normalized_phone = self._normalized_phone(phone)
-        for index, item in enumerate(members):
-            if item.get("id") != member_id:
-                continue
-            expected_phone = self._normalized_phone(str(item.get("phone") or ""))
-            if expected_phone and normalized_phone != expected_phone:
-                return None
-            if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
-                return None
-            if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
-                accepted = deepcopy(item)
-                accepted["ownerUserId"] = user_id
-                return accepted
-            accepted = deepcopy(item)
-            accepted["accessStatus"] = "active"
-            accepted["invitationStatus"] = "accepted"
-            accepted["isOnline"] = True
-            accepted["acceptedAt"] = self._now()
-            accepted["lastUpdated"] = "刚刚接受邀请"
-            accepted["ownerUserId"] = user_id
-            members[index] = accepted
-            return deepcopy(accepted)
-        return None
-
-    def accept_family_invitation_code(self, invitation_code: str, phone: str) -> Optional[Dict[str, Any]]:
-        normalized_code = invitation_code.strip()
-        if not normalized_code:
-            return None
-        normalized_phone = self._normalized_phone(phone)
-        for user_id, members in self._family_members.items():
+    def accept_family_member(self, user_id: str, member_id: str, phone: str, accepted_subject_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            members = self._family_members.get(user_id, [])
+            normalized_phone = self._normalized_phone(phone)
             for index, item in enumerate(members):
-                if str(item.get("invitationCode") or "").strip() != normalized_code:
+                if item.get("id") != member_id:
                     continue
                 expected_phone = self._normalized_phone(str(item.get("phone") or ""))
                 if expected_phone and normalized_phone != expected_phone:
                     return None
                 if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
+                    return None
+                if accepted_subject_id and item.get("acceptedUserId") not in (None, "", accepted_subject_id):
                     return None
                 if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
                     accepted = deepcopy(item)
@@ -5484,9 +5496,45 @@ class InMemoryStore:
                 accepted["acceptedAt"] = self._now()
                 accepted["lastUpdated"] = "刚刚接受邀请"
                 accepted["ownerUserId"] = user_id
+                if accepted_subject_id:
+                    accepted["acceptedUserId"] = accepted_subject_id
                 members[index] = accepted
                 return deepcopy(accepted)
-        return None
+            return None
+
+    def accept_family_invitation_code(self, invitation_code: str, phone: str, accepted_subject_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        with self._delegated_access_lock:
+            normalized_code = invitation_code.strip()
+            if not normalized_code:
+                return None
+            normalized_phone = self._normalized_phone(phone)
+            for user_id, members in self._family_members.items():
+                for index, item in enumerate(members):
+                    if str(item.get("invitationCode") or "").strip() != normalized_code:
+                        continue
+                    expected_phone = self._normalized_phone(str(item.get("phone") or ""))
+                    if expected_phone and normalized_phone != expected_phone:
+                        return None
+                    if item.get("accessStatus") == "revoked" or item.get("invitationStatus") == "revoked":
+                        return None
+                    if accepted_subject_id and item.get("acceptedUserId") not in (None, "", accepted_subject_id):
+                        return None
+                    if item.get("accessStatus") == "active" and item.get("invitationStatus") == "accepted":
+                        accepted = deepcopy(item)
+                        accepted["ownerUserId"] = user_id
+                        return accepted
+                    accepted = deepcopy(item)
+                    accepted["accessStatus"] = "active"
+                    accepted["invitationStatus"] = "accepted"
+                    accepted["isOnline"] = True
+                    accepted["acceptedAt"] = self._now()
+                    accepted["lastUpdated"] = "刚刚接受邀请"
+                    accepted["ownerUserId"] = user_id
+                    if accepted_subject_id:
+                        accepted["acceptedUserId"] = accepted_subject_id
+                    members[index] = accepted
+                    return deepcopy(accepted)
+            return None
 
     def revoke_family_member(self, user_id: str, member_id: str) -> Optional[Dict[str, Any]]:
         members = self._family_members.get(user_id, [])

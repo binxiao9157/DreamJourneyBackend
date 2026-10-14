@@ -7,6 +7,7 @@ import secrets
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
+from app.services.family_echo_access import binding_is_current
 from app.core.config import Settings
 from app.services.realtime_voice_search import RealtimeSearchFrames
 from app.domain.owner_truth.source_commands import OwnerTruthCommandContext
@@ -164,6 +165,13 @@ class RealtimeVoiceSessionBroker:
             "maxSessionSeconds": resource_profile["maxSessionSeconds"],
             "maxSessionBytes": resource_profile["maxSessionBytes"],
         }
+        if persona_scope == "family":
+            binding = session_context.get("familyAuthorization") if isinstance(session_context, Mapping) else None
+            if (not isinstance(binding, Mapping) or binding.get("viewerSubjectId") != user_id
+                    or binding.get("ownerSubjectId") != target_persona_id
+                    or not binding_is_current(self.store, binding)):
+                raise RealtimeVoiceProxyError("echoFamilyQueryNotAuthorized")
+            record["familyAuthorization"] = dict(binding)
         if (getattr(self.settings, "owner_truth_live_context_update_enabled", False)
                 and purpose == "echoLive" and persona_scope == "personal"
                 and str(target_persona_id or user_id) == user_id
@@ -319,6 +327,12 @@ class RealtimeVoiceSessionBroker:
     def _is_target_authority_current(self, lease: Mapping[str, Any]) -> bool:
         """Re-check the snapshot owner before keeping a provider stream alive."""
 
+        if lease.get("personaScope") == "family":
+            binding = lease.get("familyAuthorization")
+            if (not isinstance(binding, Mapping) or binding.get("viewerSubjectId") != lease.get("userId")
+                    or binding.get("ownerSubjectId") != lease.get("targetPersonaId")
+                    or not binding_is_current(self.store, binding)):
+                return False
         raw_epoch = lease.get("authorityEpoch")
         target_persona_id = str(lease.get("targetPersonaId") or "").strip()
         if raw_epoch is None or not target_persona_id:

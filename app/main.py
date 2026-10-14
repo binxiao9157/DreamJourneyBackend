@@ -172,6 +172,7 @@ from app.services.publication_external_cleanup import (
 )
 from app.services.publication_visitor_reader import PublicationVisitorReaderService
 from app.services.family_visitor_v4_routing import FamilyVisitorV4RoutingPolicy
+from app.services.family_echo_access import authorize_family_echo, binding_is_current, received_echo_members
 from app.services.identity_bindings import (
     IdentityChallengeConfigurationError,
     IdentityChallengeDeliveryError,
@@ -7687,7 +7688,7 @@ async def require_backend_api_token(request: Request, call_next):
                 "match" if claims == {principal_user_id} else "mismatch"
             )
         try:
-            policy_decision = CrossAccountAuthorizationPolicy(store).evaluate(
+            policy_decision = CrossAccountAuthorizationPolicy(store, family_subject_resolver=_family_subject_for_phone).evaluate(
                 method=request.method,
                 path=request.url.path,
                 principal_user_id=principal_user_id,
@@ -15014,6 +15015,26 @@ def _password_authentication_or_unavailable() -> PasswordAuthenticationService:
         ) from exc
 
 
+@app.post("/v2/auth/username/register")
+def register_with_username(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not settings.username_registration_enabled or not settings.password_authentication_enabled:
+        raise HTTPException(status_code=503, detail="usernameRegistrationUnavailable")
+    if payload.get("legalConsent") is not True:
+        raise HTTPException(status_code=400, detail="legalConsentRequired")
+    from app.services.username_registration import register_username
+    try:
+        result = register_username(store, _identity_binding_service(),
+            code=str(payload.get("invitationCode") or ""), username=str(payload.get("username") or ""),
+            password=str(payload.get("password") or ""), nickname=str(payload.get("nickname") or ""))
+    except IdentityChallengeConfigurationError as exc:
+        raise HTTPException(status_code=503, detail="usernameRegistrationUnavailable") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="usernameRegistrationUnavailable") from exc
+    # Registration does not auto-login or accept the relationship. A retry cannot
+    # disclose credentials or obtain a second session with a consumed invitation.
+    return result
+
+
 @app.post("/v2/auth/password/login")
 def login_with_password(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
@@ -17525,6 +17546,36 @@ def _build_authorized_echo_context(
         or digital_human_id != owner_subject_id
         or bool(viewer_family_member_id)
     )
+    if (persona_scope == "family" and viewer_family_member_id
+            and digital_human_id != owner_subject_id):
+        try:
+            binding = authorize_family_echo(store, viewer=owner_subject_id,
+                owner=digital_human_id, member=viewer_family_member_id)
+        except ValueError:
+            # Preserve the existing private-context denial for ungranted callers.
+            binding = None
+        if binding:
+            read_context = OwnerTruthCommandContext(vault_id=digital_human_id,
+                owner_subject_id=digital_human_id, actor_subject_id=digital_human_id)
+            read_payload = {"userId": digital_human_id, "personaScope": "personal",
+                "digitalHumanId": digital_human_id, "intent": payload.get("intent", "echo_chat"),
+                "query": payload.get("query", "")}
+            try:
+                formal_packet = OwnerTruthContextAuthorityService(store, settings=settings, enabled=True,
+                    hybrid_ranker=_owner_truth_memory_search_hybrid_ranker()).build_packet(
+                        context=read_context, payload=read_payload)
+            except OwnerTruthMemoryProjectionError as exc:
+                raise _owner_truth_memory_projection_http_error(exc) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="familyFormalMemoryUnavailable") from exc
+            packet = {key: formal_packet[key] for key in ("traceId", "contextVersion", "generationContext",
+                "contextAuthority", "safetyPolicy", "aiDisclosure") if key in formal_packet}
+            packet["persona"] = {"personaScope": "family", "digitalHumanId": digital_human_id}
+            packet["familyAuthorization"] = binding
+            if not binding_is_current(store, binding):
+                raise HTTPException(status_code=403, detail="echoFamilyQueryNotAuthorized")
+            # No target-owner citation command or conversation write is authorized.
+            return packet, None, None
     if is_cross_identity:
         routing_principal = viewer_family_member_id or owner_subject_id
         routing_target = (
@@ -17677,6 +17728,14 @@ def _build_authorized_realtime_live_session(
             detail={"code": "echoLivePersonaScopeInvalid"},
         )
 
+    family_binding = None
+    if persona_scope == "family":
+        try:
+            family_binding = authorize_family_echo(store, viewer=requester_subject_id,
+                owner=target_owner_subject_id, member=viewer_family_member_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail="echoFamilyQueryNotAuthorized") from exc
+
     context = OwnerTruthCommandContext(
         vault_id=target_owner_subject_id,
         owner_subject_id=target_owner_subject_id,
@@ -17759,6 +17818,7 @@ def _build_authorized_realtime_live_session(
         "personaScope": "family" if persona_scope == "family" else "personal",
         "snapshot": snapshot,
         "sessionContext": {
+            **({"familyAuthorization": family_binding} if family_binding else {}),
             "contextUpdateVersion": (1 if persona_scope in {"personal", "self"}
                 and payload.get("supportsLiveContextUpdateV1") is True else 0),
             "systemRole": _REALTIME_LIVE_SYSTEM_ROLE,
@@ -18154,6 +18214,10 @@ def answer_echo_question(request: Request, payload: Dict[str, Any]) -> JSONRespo
             conversation_context_summary = text_conversation_context.public_summary(
                 source="server"
             )
+
+    family_binding = packet.get("familyAuthorization")
+    if family_binding and not binding_is_current(store, family_binding):
+        raise HTTPException(status_code=403, detail="echoFamilyQueryNotAuthorized")
 
     return JSONResponse(
         content={
@@ -20433,16 +20497,73 @@ def get_echo_delayed_reply_answer(
     )
 
 
+def _family_phone(phone: str) -> str:
+    digits = "".join(c for c in phone if c in "0123456789")
+    if len(digits) == 13 and digits.startswith("86"):
+        digits = digits[2:]
+    if len(digits) != 11 or not digits.startswith("1"):
+        raise HTTPException(status_code=400, detail="familyPhoneInvalid")
+    return digits
+
+
+def _family_subject_for_phone(phone: str) -> Optional[str]:
+    normalized = _family_phone(phone)
+    try:
+        subject = _identity_binding_service().subject_for_target(identity_type="phone", target=normalized)
+    except IdentityChallengeConfigurationError:
+        subject = None
+    if subject:
+        return subject
+    if AUTH_LEGACY_PHONE_LOGIN_ENABLED or (AUTH_ROUTE_MODE != "enforce" and not _configured_backend_api_token()):
+        return stable_user_id(normalized)
+    return None
+
+
+def _family_accepting_subject(request: Request, phone: str) -> str:
+    subject = _family_subject_for_phone(phone)
+    if not subject:
+        raise HTTPException(status_code=403, detail="verified phone identity is required")
+    _require_user_principal_identity(request, subject, "authenticated user does not match family invitation")
+    return subject
+
+
 @app.post("/family/invite")
 def invite_family(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     _, payload = _principal_owned_payload(request, payload)
-    invite_payload = _sanitize_family_member_payload(payload)
-    user_id = str(invite_payload["userId"])
-    invite_payload.setdefault("accessStatus", "pending")
-    invite_payload.setdefault("invitationStatus", "pending")
-    invitation_code = str(invite_payload.get("invitationCode") or "").strip()
-    if not invitation_code:
-        invitation_code = secrets.token_urlsafe(6).replace("-", "").replace("_", "")[:10].upper()
+    registration = payload.get("invitationKind") == "accountRegistration"
+    username_invite = payload.get("invitationKind") == "username"
+    if registration and not settings.username_registration_enabled:
+        raise HTTPException(status_code=503, detail="usernameRegistrationUnavailable")
+    phone = "" if (registration or username_invite) else _family_phone(str(payload.get("phone") or ""))
+    user_id = str(payload["userId"])
+    recipient = None
+    if username_invite:
+        try:
+            recipient = _identity_binding_service().subject_for_target(identity_type="username", target=str(payload.get("username") or ""))
+        except ValueError:
+            recipient = None
+        if not recipient:
+            raise HTTPException(status_code=400, detail="familyRecipientUnavailable")
+    elif not registration:
+        recipient = _family_subject_for_phone(phone)
+    if recipient == user_id:
+        raise HTTPException(status_code=400, detail="familySelfInvitationInvalid")
+    fields = {key: payload[key] for key in ("id", "name", "relation", "digitalHumanMode") if key in payload}
+    invite_payload = _sanitize_family_member_payload({**fields, "userId": user_id, "phone": phone})
+    if username_invite:
+        invite_payload["recipientUserId"] = recipient
+        invite_payload["invitationKind"] = "username"
+    invite_payload["accessStatus"] = "pending"
+    invite_payload["invitationStatus"] = "pending"
+    if registration:
+        from app.services.username_registration import invitation_is_available
+        pending = [m for m in store.list_family_members(user_id)
+                   if invitation_is_available(m, datetime.now(timezone.utc).isoformat())]
+        if len(pending) >= 20:
+            raise HTTPException(status_code=429, detail="familyInvitationLimitReached")
+        invite_payload["invitationKind"] = "accountRegistration"
+        invite_payload["invitationExpiresAt"] = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    invitation_code = secrets.token_hex(12).upper()
     invite_payload["invitationCode"] = invitation_code
     invite_payload["invitationURL"] = f"dreamjourney://family/invite?code={invitation_code}"
     member = store.add_family_member(user_id, invite_payload)
@@ -20458,58 +20579,69 @@ def family_members(request: Request, user_id: str) -> Dict[str, Any]:
     user_id = _principal_path_owner(request, user_id)
     return {
         "userId": user_id,
-        "members": _delegated_access_service().list_decorated_family_members(user_id),
+        "members": (_delegated_access_service().list_decorated_family_members(user_id)
+                    + received_echo_members(store, user_id)),
     }
 
 
 @app.post("/family/members/{user_id}/{member_id}/accept")
 def accept_family_member(request: Request, user_id: str, member_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    phone = str(payload.get("phone") or "").strip()
-    if not phone:
-        raise HTTPException(status_code=400, detail="phone is required")
-    principal_user_id = _request_user_principal_id(request)
-    if principal_user_id is not None and principal_user_id != stable_user_id(phone):
-        raise HTTPException(status_code=403, detail="authenticated user does not match family invitation")
-    member = store.accept_family_member(user_id, member_id, phone=phone)
-    if member is None:
-        raise HTTPException(status_code=404, detail="family member not found or phone mismatch")
-    accepted_subject_id = stable_user_id(phone)
-    service = _delegated_access_service()
-    service.ensure_relationship_for_member(
-        owner_subject_id=user_id,
-        member=member,
-        accepted_subject_id=accepted_subject_id,
-    )
-    return {
-        "status": "accepted",
-        "member": service.decorate_family_member(owner_subject_id=user_id, member=member),
-    }
+    phone = _family_phone(str(payload.get("phone") or ""))
+    accepted_subject_id = _family_accepting_subject(request, phone)
+    with store.delegated_access_relationship_scope(owner_subject_id=user_id,
+            relationship_id=DelegatedAccessService.relationship_id(user_id, member_id)):
+        member = store.accept_family_member(user_id, member_id, phone=phone, accepted_subject_id=accepted_subject_id)
+        if member is None:
+            raise HTTPException(status_code=404, detail="family member not found or phone mismatch")
+        service = _delegated_access_service()
+        service.ensure_relationship_for_member(
+            owner_subject_id=user_id,
+            member=member,
+            accepted_subject_id=accepted_subject_id,
+        )
+        return {
+            "status": "accepted",
+            "member": service.decorate_family_member(owner_subject_id=user_id, member=member),
+        }
+
 
 
 @app.post("/family/invitations/{invitation_code}/accept")
 def accept_family_invitation_code(request: Request, invitation_code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    phone = str(payload.get("phone") or "").strip()
-    if not phone:
-        raise HTTPException(status_code=400, detail="phone is required")
-    _require_user_principal_identity(
-        request,
-        stable_user_id(phone),
-        "authenticated user does not match family invitation",
-    )
-    member = store.accept_family_invitation_code(invitation_code, phone=phone)
-    if member is None:
-        raise HTTPException(status_code=404, detail="invitation not found or phone mismatch")
-    owner_user_id = str(member.get("ownerUserId") or member.get("userId") or "").strip()
-    service = _delegated_access_service()
-    service.ensure_relationship_for_member(
-        owner_subject_id=owner_user_id,
-        member=member,
-        accepted_subject_id=_request_user_principal_id(request) or stable_user_id(phone),
-    )
-    return {
-        "status": "accepted",
-        "member": service.decorate_family_member(owner_subject_id=owner_user_id, member=member),
-    }
+    invitation_code = invitation_code.strip().upper()
+    invitation = store.get_family_invitation(invitation_code)
+    if invitation and invitation.get("invitationKind") in {"accountRegistration", "username"}:
+        accepted_subject_id = _request_user_principal_id(request)
+        recipient = invitation.get("registrationSubjectId") if invitation.get("invitationKind") == "accountRegistration" else invitation.get("recipientUserId")
+        if not accepted_subject_id or recipient != accepted_subject_id:
+            raise HTTPException(status_code=403, detail="invitationPrincipalMismatch")
+        expiry = invitation.get("invitationExpiresAt")
+        if (expiry and invitation.get("invitationStatus") != "accepted"
+                and datetime.fromisoformat(str(expiry)) <= datetime.now(timezone.utc)):
+            raise HTTPException(status_code=409, detail="familyInvitationExpired")
+        phone = ""
+    else:
+        phone = _family_phone(str(payload.get("phone") or ""))
+        accepted_subject_id = _family_accepting_subject(request, phone)
+    if not invitation:
+        raise HTTPException(status_code=404, detail="invitationNotFound")
+    invitation_owner = str(invitation.get("userId") or "")
+    with store.delegated_access_relationship_scope(owner_subject_id=invitation_owner,
+            relationship_id=DelegatedAccessService.relationship_id(invitation_owner, str(invitation["id"]))):
+        member = store.accept_family_invitation_code(invitation_code, phone=phone, accepted_subject_id=accepted_subject_id)
+        if member is None:
+            raise HTTPException(status_code=404, detail="invitation not found or phone mismatch")
+        owner_user_id = str(member.get("ownerUserId") or member.get("userId") or "").strip()
+        service = _delegated_access_service()
+        service.ensure_relationship_for_member(
+            owner_subject_id=owner_user_id,
+            member=member,
+            accepted_subject_id=accepted_subject_id,
+        )
+        return {
+            "status": "accepted",
+            "member": service.decorate_family_member(owner_subject_id=owner_user_id, member=member),
+        }
 
 
 @app.post("/family/members/{user_id}/{member_id}/revoke")
