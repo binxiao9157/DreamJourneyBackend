@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>注册人数管理</title>
+<style>
+body{font:16px system-ui;max-width:960px;margin:24px auto;padding:16px;color:#222}label{display:block;margin:12px 0}input{padding:8px;max-width:100%;box-sizing:border-box}button{padding:10px;margin:6px 6px 6px 0;cursor:pointer}button:disabled{cursor:wait}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ccc;padding:8px;text-align:left;overflow-wrap:anywhere} .table-scroll{overflow-x:auto}table{min-width:640px}#message,#result,#counts{white-space:pre-wrap;overflow-wrap:anywhere}#result{padding:16px;background:#f1f6f4}small{color:#555}[hidden]{display:none!important}#pending{border-left:4px solid #b66d00;padding:12px}#owner{width:360px}#source{width:360px}
+</style>
+<h1>注册人数管理</h1><p>邀请码只控制新注册人数，不限制现有账号功能。家人记忆授权另行确认。</p>
+<form id="login"><label>运营管理员密码 <input id="password" type="password" autocomplete="current-password" required></label><button>登录</button></form>
+<section id="panel" hidden>
+<p id="counts"></p>
+<form id="policy"><label>人数上限 <input id="cap" type="number" min="0" step="1" required></label><label>短信累计预算（条）<input id="budget" type="number" min="0" step="1" required></label><label><input id="paused" type="checkbox">暂停新注册</label><button>保存配置</button></form>
+<form id="issue"><label>分配给账号 ID（留空由管理员分享）<input id="owner"></label><label>来源备注 <input id="source" maxlength="120"></label><button>预留一人并生成邀请码</button></form>
+<p><small>同一邀请码只能注册一人；默认七天到期。重复分享不占新名额。发放结果保留在当前标签页，退出管理员后清除。</small></p>
+<p id="result" hidden></p>
+<div class="table-scroll"><table><thead><tr><th>编号</th><th>状态</th><th>分配账号</th><th>到期</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div>
+<button id="refresh">刷新</button><button id="logout">退出</button>
+</section>
+<section id="pending" hidden><p>上次操作结果尚未确认。请保留此标签页，登录后点击下方按钮核对原操作；不会另占一个名额。</p><button id="retry">核对并重试原操作</button></section>
+<p role="status" aria-live="polite" id="message"></p>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), storageKey='dj.registration.admin.pending.v1',resultKey='dj.registration.admin.result.v1';
+let csrf='',revision=0,busy=false,authenticated=false,pending=null,lastResult=null;
+const errors={registrationAdminInvalid:'管理员密码不正确',registrationAdminRequired:'管理员登录已过期，请重新登录',registrationAdminRateLimited:'登录尝试过多，请稍后再试',registrationAdminUnavailable:'运营管理员尚未配置',registrationAdminOriginRejected:'页面来源不受信任，请使用正式运营地址',registrationAdminCSRFRejected:'页面验证已失效，请刷新后重试',registrationPolicyConflict:'配置已被其他操作更新，请刷新并核对后重新保存',registrationCapBelowOccupancy:'人数上限不能低于已注册人数与预留名额之和',registrationBudgetBelowUsed:'短信预算不能低于已使用条数',registrationPolicyInvalid:'请填写非负整数配置',registrationCapacityReached:'注册名额已用尽，请调整上限或撤销未用邀请码',registrationPaused:'新注册已暂停，请先核对配置',registrationConfigurationUnavailable:'请先配置注册人数上限',registrationRecipientUnknown:'分配账号不存在，请核对账号 ID',registrationAlreadyRedeemed:'邀请码已被使用，不能撤销',registrationInviteUnavailable:'邀请码不存在或已不可用',registrationUnavailable:'注册运营服务尚未开放',registrationIdempotencyConflict:'操作参数冲突，请保留页面并联系维护人员'};
+function message(text){$('message').textContent=text}
+function controls(){
+ $('panel').hidden=!authenticated;$('login').hidden=authenticated;$('pending').hidden=!pending;
+ document.querySelectorAll('#panel input,#panel button').forEach(el=>el.disabled=busy||!!pending);
+ $('refresh').disabled=busy;$('retry').disabled=busy||!authenticated;
+ document.querySelectorAll('#login input,#login button').forEach(el=>el.disabled=busy);
+}
+function renderResult(){
+ $('result').hidden=!lastResult;
+ if(lastResult)$('result').textContent=lastResult.closedStatus?`最近发放的邀请码${lastResult.closedStatus}，请勿继续分享。`:`注册邀请码：${lastResult.invitationCode}\n有效期至：${new Date(lastResult.expiresAt*1000).toLocaleString()}\n仅用于注册，不自动共享记忆。`;
+}
+function saveResult(result){sessionStorage.setItem(resultKey,JSON.stringify(result));lastResult=result;renderResult()}
+function clearPending(){sessionStorage.removeItem(storageKey);pending=null}
+async function call(path,body){
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
+ try{
+  const opt={credentials:'same-origin',signal:controller.signal,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}};
+  if(body!==undefined){opt.method='POST';opt.body=JSON.stringify(body)}
+  const response=await fetch('/ops/registration'+path,opt);
+  const data=await response.json();
+  if(!response.ok){const e=new Error(errors[data.detail?.code]||'操作未完成，请核对后重试');e.code=data.detail?.code;e.status=response.status;throw e}
+  return data;
+ }finally{clearTimeout(timer)}
+}
+function showError(error){
+ if(error.status===401){authenticated=false;csrf=''}
+ message(error.status?`${error.message}${error.code?'（'+error.code+'）':''}`:'网络请求未完成。若有待核对操作，请重试原操作，不要另发邀请码。');controls();
+}
+async function load(){
+ const state=await call('/state');csrf=state.csrf;revision=state.revision;authenticated=true;
+ $('counts').textContent=`上限：${state.cap??'未配置'}　已注册：${state.registered}　预留：${state.reserved}　可发：${state.available}　已提交短信：${state.smsUsed}`;
+ $('cap').value=state.cap??'';$('budget').value=state.smsBudget;$('paused').checked=state.paused;$('rows').replaceChildren();
+ const statuses={reserved:'未使用（预留）',revoked:'已撤销',redeemed:'已使用',expired:'已过期'};
+ for(const invite of state.invitations){
+  const row=document.createElement('tr');
+  for(const value of [invite.id.slice(0,12),statuses[invite.status]||invite.status,invite.allocatedTo||'管理员',new Date(invite.expiresAt*1000).toLocaleString()]){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}
+  const cell=document.createElement('td');
+  if(invite.status==='reserved'){const button=document.createElement('button');button.textContent='撤销未用码';button.onclick=()=>safe(()=>mutate('/revoke',{invitationId:invite.id}));cell.append(button)}
+  row.append(cell);$('rows').append(row);
+  if(lastResult?.id===invite.id && invite.status!=='reserved'){
+   saveResult({...lastResult,closedStatus:statuses[invite.status]||'不可用'});
+  }
+ }
+ renderResult();controls();
+}
+async function safe(action){if(busy)return;busy=true;controls();try{await action()}catch(e){showError(e)}finally{busy=false;controls()}}
+async function finishPending(){
+ let result;
+ try{result=await call(pending.path,{...pending.data,operationId:pending.id})}
+ catch(e){if(e.status>=400&&e.status<500&&e.status!==401)clearPending();throw e}
+ const operation=pending;
+ // Preserve the known outcome before refreshing state, so a failed GET cannot hide a successful POST.
+ if(operation.path==='/invitations')saveResult(result);
+ else if(operation.path==='/revoke'&&lastResult?.id===operation.data.invitationId)saveResult({...lastResult,closedStatus:'已撤销'});
+ clearPending();message(operation.path==='/invitations'?'邀请码已生成，请妥善保存。':operation.path==='/revoke'?'邀请码已撤销，未用名额已释放。':'配置已保存。');
+ try{await load()}catch(e){if(e.status===401){authenticated=false;csrf=''}message('操作已成功，列表尚未刷新。请刷新列表；邀请码结果已保留。')}
+}
+async function mutate(path,data){
+ if(pending)throw Error('上次操作待核对');
+ const operation={path,data,id:crypto.randomUUID()};
+ sessionStorage.setItem(storageKey,JSON.stringify(operation));pending=operation;controls();await finishPending();
+}
+$('login').onsubmit=e=>{e.preventDefault();safe(async()=>{const r=await call('/login',{password:$('password').value});$('password').value='';csrf=r.csrf;await load();message(pending?'登录成功，请核对上次操作。':'登录成功。')})};
+$('policy').onsubmit=e=>{e.preventDefault();safe(()=>mutate('/policy',{cap:Number($('cap').value),smsBudget:Number($('budget').value),paused:$('paused').checked,revision}))};
+$('issue').onsubmit=e=>{e.preventDefault();safe(()=>mutate('/invitations',{allocatedTo:$('owner').value.trim(),source:$('source').value}))};
+$('retry').onclick=()=>safe(finishPending);
+$('refresh').onclick=()=>safe(async()=>{await load();message(pending?'列表已刷新，请核对原操作。':'列表已刷新。')});
+$('logout').onclick=()=>safe(async()=>{await call('/logout',{});sessionStorage.removeItem(resultKey);lastResult=null;authenticated=false;csrf='';renderResult();message('已退出运营管理。')});
+try{pending=JSON.parse(sessionStorage.getItem(storageKey)||'null');lastResult=JSON.parse(sessionStorage.getItem(resultKey)||'null');renderResult()}catch(e){message('浏览器无法保存操作状态，请允许当前标签页存储后再操作。')}
+safe(async()=>{try{await load()}catch(e){if(e.status!==401)throw e;authenticated=false}});
+</script></html>

@@ -433,6 +433,15 @@ def make_identity_challenge_adapter(settings: Settings) -> IdentityChallengeAdap
         return SyntheticIdentityChallengeAdapter(
             settings.identity_challenge_synthetic_code
         )
+    if requested == "tencent":
+        from app.services.tencent_sms import TencentSMSAdapter
+        try:
+            return TencentSMSAdapter(secret_id=settings.tencent_sms_secret_id,
+                secret_key=settings.tencent_sms_secret_key, region=settings.tencent_sms_region,
+                app_id=settings.tencent_sms_app_id, sign_name=settings.tencent_sms_sign_name,
+                template_id=settings.tencent_sms_template_id, parameter_count=settings.tencent_sms_parameter_count)
+        except IdentityChallengeConfigurationError:
+            return UnavailableIdentityChallengeAdapter()
     if requested in {"httpjson", "http_json"}:
         try:
             return HttpJsonIdentityChallengeAdapter(
@@ -530,6 +539,7 @@ class IdentityBindingService:
         test_account_allowlist_service: Optional[Any] = None,
         environment: str = "test",
         evidence_retention_days: int = 30,
+        allow_implicit_registration: bool = True,
     ):
         key_bytes = str(hmac_key or "").encode("utf-8")
         if len(key_bytes) < 32:
@@ -537,6 +547,7 @@ class IdentityBindingService:
                 "identity binding HMAC key must contain at least 32 bytes"
             )
         self.store = store
+        self.allow_implicit_registration = allow_implicit_registration
         self._hmac_key = key_bytes
         self.hmac_key_version = _hash_key_version(hmac_key_version)
         self._hmac_key_fingerprint = hmac.new(
@@ -889,8 +900,10 @@ class IdentityBindingService:
             subject_id=self._opaque_id("sub"),
             binding_id=self._opaque_id("idb"),
             proof_id=self._opaque_id("idp"),
-            create_binding=not action_verification,
+            create_binding=not action_verification and self.allow_implicit_registration,
         )
+        if not action_verification and result.get("outcome") == "verifiedUnbound":
+            raise IdentityChallengeVerificationFailed()
         if result.get("outcome") not in {"verified", "verifiedUnbound"}:
             self._record_event(
                 operation_id=normalized_challenge_id or self._opaque_id("op"),
@@ -1177,11 +1190,15 @@ def make_identity_binding_service(
     *,
     auth_session_service: Optional[Any] = None,
 ) -> IdentityBindingService:
+    adapter = make_identity_challenge_adapter(settings)
+    if adapter.provider_mode == "tencentSms":
+        from app.services.tencent_sms import BudgetedTencentSMSAdapter
+        adapter = BudgetedTencentSMSAdapter(adapter, store)
     return IdentityBindingService(
         store,
         hmac_key=str(settings.identity_binding_hmac_key or ""),
         hmac_key_version=settings.identity_binding_hmac_key_version,
-        adapter=make_identity_challenge_adapter(settings),
+        adapter=adapter,
         challenge_ttl_seconds=settings.identity_challenge_ttl_seconds,
         max_attempts=settings.identity_challenge_max_attempts,
         retry_after_seconds=settings.identity_challenge_retry_after_seconds,
@@ -1193,4 +1210,5 @@ def make_identity_binding_service(
         ),
         environment=settings.environment,
         evidence_retention_days=settings.evidence_rollout_retention_days,
+        allow_implicit_registration=not (settings.registration_admission_enabled or str(settings.environment).lower() == "production"),
     )

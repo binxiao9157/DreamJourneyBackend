@@ -29,9 +29,31 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         app_routes = self.business_routes()
         registry_routes = {(rule.method, rule.path_template) for rule in self.registry.rules}
 
-        self.assertEqual(len(app_routes), 268)
+        self.assertEqual(len(app_routes), 280)
         self.assertEqual(len(self.registry.rules), len(registry_routes))
         self.assertEqual(registry_routes, app_routes)
+
+    def test_registration_routes_have_explicit_policy_classification(self):
+        expected = {
+            ("POST", "/v2/auth/phone-registration/challenges"): "publicPhoneRegistration",
+            ("POST", "/v2/auth/phone-registration/verify"): "publicPhoneRegistration",
+            ("POST", "/v2/auth/phone-registration/complete"): "publicPhoneRegistration",
+            ("POST", "/v2/auth/phone-registration/result"): "publicPhoneRegistration",
+            ("POST", "/internal/registration-admin/v1/command"): "registrationSignedManagement",
+            ("GET", "/ops/registration"): "registrationAdminPage",
+            ("GET", "/ops/registration/state"): "registrationAdminSession",
+            ("POST", "/ops/registration/login"): "registrationAdminSession",
+            ("POST", "/ops/registration/logout"): "registrationAdminSession",
+            ("POST", "/ops/registration/policy"): "registrationAdminSession",
+            ("POST", "/ops/registration/invitations"): "registrationAdminSession",
+            ("POST", "/ops/registration/revoke"): "registrationAdminSession",
+        }
+        self.assertEqual(len(expected), 12)
+        for route, policy in expected.items():
+            with self.subTest(route=route):
+                rule = self.registry.rule_for_template(*route)
+                self.assertEqual(rule.category, RouteOwnershipCategory.PUBLIC)
+                self.assertEqual(rule.policy_id, policy)
 
     def test_concrete_path_match_extracts_owner_from_path_or_body(self):
         archive = self.registry.match("GET", "/archive/items/user_123")
@@ -194,8 +216,8 @@ class RouteOwnershipRegistryTests(unittest.TestCase):
         summary = self.registry.audit_summary()
         serialized = str(summary)
 
-        self.assertEqual(summary["routeCount"], 268)
-        self.assertEqual(sum(summary["categoryCounts"].values()), 268)
+        self.assertEqual(summary["routeCount"], 280)
+        self.assertEqual(sum(summary["categoryCounts"].values()), 280)
         self.assertEqual(summary["unclassifiedCount"], 0)
         self.assertNotIn("user_123", serialized)
         self.assertIn("/archive/items/{user_id}", serialized)

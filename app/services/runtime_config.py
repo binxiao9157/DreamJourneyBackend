@@ -106,6 +106,15 @@ class RuntimeConfigService:
                 and identity_challenge.get("testAccountFlowEnabled") is True
             ),
         )
+        password_authentication.update({
+            "registrationAdmissionContractVersion": 1,
+            "phoneRegistrationReady": bool(self.settings.registration_admission_enabled
+                and len(str(self.settings.registration_secret or "").encode()) >= 32
+                and identity_challenge.get("productionReady")),
+            "phoneRegistrationEndpoint": "/v2/auth/phone-registration",
+            "registrationInviteAllocationRequired": self.settings.registration_admission_enabled,
+        })
+
         media_storage = self.provider_inventory.status_for("ownerTruthMediaStorage")
         media_processing = self.provider_inventory.status_for("ownerTruthMediaProcessing")
         identity_provider = self.provider_inventory.status_for("identityChallenge")

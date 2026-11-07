@@ -7304,6 +7304,16 @@ DATABASE_TRANSACTION_BYPASS_PATHS = INFRASTRUCTURE_PATHS | frozenset(
         "/ops/release-policy/observations",
     }
 )
+# Enrollment owns short durable transactions: OTP error counts and pre-send
+# fences must survive HTTP errors. Never broaden this to existing auth/Echo paths.
+REGISTRATION_OWNED_TRANSACTION_PATHS = frozenset({
+    "/internal/registration-admin/v1/command",
+    "/v2/auth/phone-registration/challenges", "/v2/auth/phone-registration/verify",
+    "/v2/auth/phone-registration/complete", "/v2/auth/phone-registration/result",
+    "/ops/registration", "/ops/registration/login", "/ops/registration/logout",
+    "/ops/registration/state", "/ops/registration/policy",
+    "/ops/registration/invitations", "/ops/registration/revoke",
+})
 ANONYMOUS_AUTH_PATHS = {
     "/auth/login",
     "/auth/refresh",
@@ -7320,10 +7330,14 @@ ANONYMOUS_AUTH_PATH_PATTERNS = (
 
 
 def _requires_no_store(path: str) -> bool:
-    return path in NO_STORE_EXACT_PATHS or path.startswith(NO_STORE_PATH_PREFIXES)
+    if path == "/internal/registration-admin/v1/command": return True
+    return path.startswith(("/v2/auth/phone-registration/", "/ops/registration")) or path in NO_STORE_EXACT_PATHS or path.startswith(NO_STORE_PATH_PREFIXES)
 
 
 def _allows_anonymous_auth(path: str) -> bool:
+    if path == "/internal/registration-admin/v1/command": return True  # Dedicated signed service identity, never App bearer.
+    if path.startswith("/v2/auth/phone-registration/") or path == "/ops/registration" or path.startswith("/ops/registration/"):
+        return True  # Dedicated route checks enforce registration-admin cookie, CSRF and Origin.
     return path in ANONYMOUS_AUTH_PATHS or any(
         pattern.fullmatch(path) is not None
         for pattern in ANONYMOUS_AUTH_PATH_PATTERNS
@@ -7809,7 +7823,7 @@ async def database_request_unit_of_work(request: Request, call_next):
     if recovery_response is not None:
         return recovery_response
     unit_of_work_factory = getattr(store, "request_unit_of_work", None)
-    if request.url.path in DATABASE_TRANSACTION_BYPASS_PATHS or not callable(unit_of_work_factory):
+    if request.url.path in (DATABASE_TRANSACTION_BYPASS_PATHS | REGISTRATION_OWNED_TRANSACTION_PATHS) or not callable(unit_of_work_factory):
         return await call_next(request)
 
     correlation_id = secrets.token_hex(16)
@@ -15022,6 +15036,17 @@ def register_with_username(request: Request, payload: Dict[str, Any]) -> Dict[st
     if payload.get("legalConsent") is not True:
         raise HTTPException(status_code=400, detail="legalConsentRequired")
     from app.services.username_registration import register_username
+    if settings.registration_admission_enabled:
+        from app.services.registration_routes import service
+        from app.services.phone_registration import RegistrationError
+        try:
+            return service(store, _identity_binding_service(), settings).register_username(
+                code=str(payload.get("invitationCode") or ""), username=str(payload.get("username") or ""),
+                password=str(payload.get("password") or ""), nickname=str(payload.get("nickname") or ""))
+        except RegistrationError as exc:
+            raise HTTPException(exc.status, detail={"code": exc.code}) from None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="registrationUnavailable") from None
     try:
         result = register_username(store, _identity_binding_service(),
             code=str(payload.get("invitationCode") or ""), username=str(payload.get("username") or ""),
@@ -15106,6 +15131,8 @@ def login(request: Request, payload: Dict[str, Any]) -> Any:
             raise HTTPException(status_code=401, detail="invalid password")
 
         existing_user = _store_get_user(user_id)
+        if settings.registration_admission_enabled and existing_user is None:
+            raise HTTPException(status_code=409, detail="registrationAdmissionRequired")
         deletion_state = str((existing_user or {}).get("deletionState") or "active")
         if deletion_state == "purged":
             raise HTTPException(status_code=410, detail="account was permanently deleted")
@@ -20531,6 +20558,13 @@ def _family_accepting_subject(request: Request, phone: str) -> str:
 def invite_family(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     _, payload = _principal_owned_payload(request, payload)
     registration = payload.get("invitationKind") == "accountRegistration"
+    if registration and settings.registration_admission_enabled:
+        from app.services.registration_routes import service
+        from app.services.phone_registration import RegistrationError
+        try:
+            return {"member": service(store, _identity_binding_service(), settings).claim(str(payload["userId"]))}
+        except RegistrationError as exc:
+            raise HTTPException(exc.status, detail={"code": exc.code}) from None
     username_invite = payload.get("invitationKind") == "username"
     if registration and not settings.username_registration_enabled:
         raise HTTPException(status_code=503, detail="usernameRegistrationUnavailable")
@@ -20966,3 +21000,10 @@ app.include_router(
         generation_available=lambda: narrative_provider_ready(settings),
     )
 )
+
+# Isolated enrollment routes. Shared session and Echo handlers remain authoritative.
+from app.services.registration_routes import install_routes as _install_registration_routes
+_install_registration_routes(app, lambda: {"store": store, "identity": _identity_binding_service, "settings": settings})
+
+from app.services.registration_admin_bridge import install_bridge as _install_registration_bridge
+_install_registration_bridge(app, lambda: {"store": store, "identity": _identity_binding_service, "settings": settings})

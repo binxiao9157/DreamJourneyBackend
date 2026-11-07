@@ -926,7 +926,14 @@ class InMemoryStore:
             "legalHold": bool(record.get("legalHold")),
         }
 
+    def _require_registration_seat(self, subject_id: str) -> None:
+        if getattr(self, "_registration_admission_active", False):
+            seat = self._registration_state["seats"].get(subject_id)
+            if not seat or seat.get("status") != "occupied":
+                raise ValueError("registration admission required")
+
     def save_auth_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
+        self._require_registration_seat(str(session.get("userId") or ""))
         item = deepcopy(session)
         with self._auth_lock:
             self._auth_sessions[str(item["sessionId"])] = item
@@ -938,6 +945,7 @@ class InMemoryStore:
         session: Dict[str, Any],
         event: Dict[str, Any],
     ) -> Dict[str, Any]:
+        self._require_registration_seat(str(session.get("userId") or ""))
         family_item = deepcopy(family)
         session_item = deepcopy(session)
         event_item = deepcopy(event)
@@ -1891,7 +1899,7 @@ class InMemoryStore:
             )
             existing_binding_id = self._identity_binding_ids_by_target.get(target_key)
             if existing_binding_id is None:
-                if not create_binding:
+                if not create_binding or getattr(self, "_registration_admission_active", False):
                     challenge["status"] = "consumed"
                     challenge["consumedAt"] = attempted_at.isoformat()
                     return {
@@ -2725,6 +2733,7 @@ class InMemoryStore:
 
     def upsert_user(self, phone: str, nickname: str) -> Dict[str, Any]:
         user_id = stable_user_id(phone)
+        self._require_registration_seat(user_id)
         with self._auth_lock:
             existing = self._users.get(user_id, {})
             guard_account_upsert(existing)
@@ -4913,6 +4922,8 @@ class InMemoryStore:
                                   binding_id: str, credential: Dict[str, Any], nickname: str,
                                   now_iso: str) -> bool:
         from app.services.username_registration import invitation_is_available
+        if getattr(self, "_registration_admission_active", False):
+            raise ValueError("registration admission required")
         with self._identity_lock, self._delegated_access_lock:
             item = next((m for rows in self._family_members.values() for m in rows
                          if m.get("invitationCode") == code), None)

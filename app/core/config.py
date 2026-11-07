@@ -66,6 +66,19 @@ class Settings:
     identity_challenge_ttl_seconds: int = 300
     identity_challenge_max_attempts: int = 5
     identity_challenge_retry_after_seconds: int = 30
+    registration_admission_enabled: bool = False
+    registration_secret: Optional[str] = None
+    registration_admin_password_hash: Optional[str] = None
+    registration_admin_origin: Optional[str] = None
+    registration_management_service_key: Optional[str] = None
+    registration_local_prototype_enabled: bool = False
+    tencent_sms_secret_id: Optional[str] = None
+    tencent_sms_secret_key: Optional[str] = None
+    tencent_sms_region: str = "ap-guangzhou"
+    tencent_sms_app_id: Optional[str] = None
+    tencent_sms_sign_name: Optional[str] = None
+    tencent_sms_template_id: Optional[str] = None
+    tencent_sms_parameter_count: int = 1
     username_registration_enabled: bool = False
     password_authentication_enabled: bool = True
     # A machine-managed, target-restricted login lane for synthetic QA
@@ -479,6 +492,19 @@ class Settings:
                 "IDENTITY_CHALLENGE_RETRY_AFTER_SECONDS",
                 cls.identity_challenge_retry_after_seconds,
             ),
+            registration_admission_enabled=_env_bool("REGISTRATION_ADMISSION_ENABLED", cls.registration_admission_enabled),
+            registration_secret=_env("REGISTRATION_SECRET", cls.registration_secret),
+            registration_admin_password_hash=_env("REGISTRATION_ADMIN_PASSWORD_HASH", cls.registration_admin_password_hash),
+            registration_admin_origin=_env("REGISTRATION_ADMIN_ORIGIN", cls.registration_admin_origin),
+            registration_management_service_key=_env("REGISTRATION_MANAGEMENT_SERVICE_KEY"),
+            registration_local_prototype_enabled=_env_bool("REGISTRATION_LOCAL_PROTOTYPE_ENABLED", False),
+            tencent_sms_secret_id=_env("TENCENT_SMS_SECRET_ID", cls.tencent_sms_secret_id),
+            tencent_sms_secret_key=_env("TENCENT_SMS_SECRET_KEY", cls.tencent_sms_secret_key),
+            tencent_sms_region=_env("TENCENT_SMS_REGION", cls.tencent_sms_region),
+            tencent_sms_app_id=_env("TENCENT_SMS_APP_ID", cls.tencent_sms_app_id),
+            tencent_sms_sign_name=_env("TENCENT_SMS_SIGN_NAME", cls.tencent_sms_sign_name),
+            tencent_sms_template_id=_env("TENCENT_SMS_TEMPLATE_ID", cls.tencent_sms_template_id),
+            tencent_sms_parameter_count=_env_int("TENCENT_SMS_PARAMETER_COUNT", cls.tencent_sms_parameter_count),
             username_registration_enabled=_env_bool("USERNAME_REGISTRATION_ENABLED", cls.username_registration_enabled),
             password_authentication_enabled=_env_bool(
                 "PASSWORD_AUTHENTICATION_ENABLED",
